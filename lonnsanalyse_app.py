@@ -138,8 +138,12 @@ if uploaded_file is not None:
             if reg_results:
                 st.markdown("---")
                 st.markdown(f"**Regresjon (Ansiennitet vs. Lønn):**")
-                st.markdown(f"- $\\text{Stigning (kr/år):}$ $\\text{kr}$ $\\text{{slope:,.0f}}$".replace(",", " "))
-                st.markdown(f"- $\\text{R}^{\\text{2}} \\text{(Forklart variasjon):}$ $\\text{{r_squared:.2f}}$")
+                
+                # FIKS: Bruker rå strenger (r"...") og separerer f-string interpolasjon for å unngå
+                # SyntaxError pga. Escaping av backslash i LaTeX-formelen under deployering.
+                # Setter variabelen i en separat f-string med dollartegn for å sikre riktig LaTeX-formatering.
+                st.markdown(r"- $\text{Stigning (kr/år):}$ $\text{kr}$ " + f"${slope:,.0f}$".replace(",", " "))
+                st.markdown(r"- $\text{R}^{2} \text{(Forklart variasjon):}$ " + f"${r_squared:.2f}$")
                 
                 # Sorter listen etter navn
                 employee_names = filtered_df.sort_values(by='Etternavn')['Fullt Navn'].tolist()
