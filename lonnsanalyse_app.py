@@ -208,45 +208,49 @@ try:
     )
 
     # --- LAYOUT MED KOLONNER ---
-    # col_plot rendres FØR col_stats i koden (selv om col_stats vises til venstre) slik at et
-    # klikk i grafen kan nullstille "employee_selector" trygt før den widgeten instansieres
-    # denne kjøringen - Streamlit tillater ikke å endre en widgets session_state-verdi etter
-    # at den allerede er instansiert i samme kjøring.
+    # col_plot rendres FØR col_stats' ansattvelger i koden (selv om col_stats vises til venstre)
+    # slik at et klikk i grafen kan sette "employee_selector" trygt før den widgeten
+    # instansieres denne kjøringen - Streamlit tillater ikke å endre en widgets
+    # session_state-verdi etter at den allerede er instansiert i samme kjøring.
 
     all_codes = sorted(df["Stillingskode"].unique(), key=str)
-    pending_codes = st.session_state.get("pending_selected_codes")
-    default_codes = [c for c in pending_codes if c in all_codes] if pending_codes else all_codes
-    if not default_codes:
-        default_codes = all_codes
 
     col_stats, col_plot = st.columns([1, 2])
 
-    with col_plot:
-        filter_col, x_axis_col = st.columns([2, 1])
-        with filter_col:
-            selected_codes = st.multiselect(
-                "Stillingskode(r) for visning (regresjon kjøres alltid per kode, på hele datasettet):",
-                options=all_codes,
-                default=default_codes,
-                key="stillingskode_filter",
-            )
-        st.session_state.pending_selected_codes = None
+    with col_stats:
+        # Gjenopprett lagret stillingskode-filter FØR "stillingskode_filter" instansieres
+        # denne kjøringen. Å kun sende inn "default=" er upålitelig hvis widget-nøkkelen av
+        # noen grunn allerede eksisterer (f.eks. etter en mellomliggende rerun) - Streamlit
+        # ignorerer da "default=" og beholder sin egen, gamle verdi. Å skrive direkte inn i
+        # nøkkelen her er den eneste garanterte måten å sette startverdien på.
+        pending_codes = st.session_state.pop("pending_selected_codes", None)
+        if pending_codes and "stillingskode_filter" not in st.session_state:
+            valid_codes = [c for c in pending_codes if c in all_codes]
+            if valid_codes:
+                st.session_state["stillingskode_filter"] = valid_codes
+
+        selected_codes = st.multiselect(
+            "Stillingskode(r) for visning (regresjon kjøres alltid per kode, på hele datasettet):",
+            options=all_codes,
+            default=all_codes,
+            key="stillingskode_filter",
+        )
 
         x_col = "Ansiennitet (År)"
         x_label = "Ansiennitet (år) siden tiltredelse"
         if position_seniority_col:
-            with x_axis_col:
-                x_choice_options = ["Ansiennitet (År)", "Stillingsansiennitet (År)"]
-                default_x_idx = x_choice_options.index(st.session_state.x_axis_choice) if st.session_state.x_axis_choice in x_choice_options else 0
-                x_col = st.radio(
-                    "X-akse:",
-                    options=x_choice_options,
-                    index=default_x_idx,
-                    format_func=lambda v: "Ansiennitet" if v == "Ansiennitet (År)" else "Stillingsansiennitet",
-                    key="x_axis_radio",
-                )
-                x_label = "Ansiennitet (år) siden tiltredelse" if x_col == "Ansiennitet (År)" else "Stillingsansiennitet (år)"
-                st.session_state.x_axis_choice = x_col
+            x_choice_options = ["Ansiennitet (År)", "Stillingsansiennitet (År)"]
+            if "x_axis_radio" not in st.session_state and st.session_state.x_axis_choice in x_choice_options:
+                st.session_state["x_axis_radio"] = st.session_state.x_axis_choice
+            x_col = st.radio(
+                "X-akse:",
+                options=x_choice_options,
+                format_func=lambda v: "Ansiennitet siden tiltredelse" if v == "Ansiennitet (År)" else "Stillingsansiennitet",
+                horizontal=True,
+                key="x_axis_radio",
+            )
+            x_label = "Ansiennitet (år) siden tiltredelse" if x_col == "Ansiennitet (År)" else "Stillingsansiennitet (år)"
+            st.session_state.x_axis_choice = x_col
 
     # --- REGRESJON PER STILLINGSKODE (alltid på hele datasettet) ---
 
@@ -269,26 +273,15 @@ try:
         union_values = sorted(v for v in df[union_col].dropna().unique() if str(v).strip())
 
     with col_plot:
-        st.caption("📈 Klikk på et punkt i grafen for å velge ansatt til detaljvisning.")
-
-        band_col, union_col_widgets = st.columns([1, 2])
-        with band_col:
-            show_band = st.checkbox(
-                "Vis 95% referanseintervall",
-                value=True,
-                help="Bånd på ±1,96 standardavvik (residualer) rundt hver trendlinje - viser normalspredningen for stillingskoden.",
-            )
-
         union_highlight_selection = {}
         if union_values:
-            with union_col_widgets:
-                st.caption("Uthev fagforeningsmedlemmer:")
-                union_widget_cols = st.columns(min(len(union_values), 3))
-                for i, uv in enumerate(union_values):
-                    with union_widget_cols[i % len(union_widget_cols)]:
-                        union_highlight_selection[uv] = st.checkbox(
-                            f"Uthev {uv}-medlemmer", key=f"union_highlight_{uv}"
-                        )
+            st.caption("Uthev fagforeningsmedlemmer:")
+            union_widget_cols = st.columns(min(len(union_values), 4))
+            for i, uv in enumerate(union_values):
+                with union_widget_cols[i % len(union_widget_cols)]:
+                    union_highlight_selection[uv] = st.checkbox(
+                        f"Uthev {uv}-medlemmer", key=f"union_highlight_{uv}"
+                    )
 
         plot_df = filtered_df.copy()
         plot_df["Farge"] = plot_df["Stillingskode"].astype(str)
@@ -350,7 +343,7 @@ try:
             x_range = np.linspace(code_points[x_col].min(), code_points[x_col].max(), 50)
             y_range = r["intercept"] + r["slope"] * x_range
 
-            if show_band and r["std_residual"] and r["std_residual"] > 1e-9:
+            if r["std_residual"] and r["std_residual"] > 1e-9:
                 band = 1.96 * r["std_residual"]
                 fig.add_scatter(
                     x=x_range, y=y_range + band, mode="lines", line=dict(width=0),
@@ -437,25 +430,24 @@ try:
             st.dataframe(pd.DataFrame(reg_table), hide_index=True, use_container_width=True)
 
         employee_names = filtered_df.sort_values(by="Etternavn")["Fullt Navn"].tolist()
-
-        pending_hash = st.session_state.get("pending_selected_employee_hash")
-        default_employee = None
-        if pending_hash:
-            match = filtered_df[filtered_df["_hash"] == pending_hash]
-            if not match.empty:
-                default_employee = match.iloc[0]["Fullt Navn"]
-
         employee_options = [None] + employee_names
-        default_idx = employee_options.index(default_employee) if default_employee in employee_options else 0
+
+        # Samme prinsipp som for stillingskode-filteret over: skriv den lagrede verdien
+        # direkte inn i "employee_selector" sin egen nøkkel FØR widgeten instansieres,
+        # i stedet for å stole på "index=" (som ignoreres hvis nøkkelen alt finnes).
+        pending_hash = st.session_state.pop("pending_selected_employee_hash", None)
+        if pending_hash and "employee_selector" not in st.session_state:
+            match = filtered_df[filtered_df["_hash"] == pending_hash]
+            if not match.empty and match.iloc[0]["Fullt Navn"] in employee_options:
+                st.session_state["employee_selector"] = match.iloc[0]["Fullt Navn"]
+                st.session_state.selected_employee = match.iloc[0]["Fullt Navn"]
 
         new_selected_employee = st.selectbox(
             "👤 Velg ansatt for detaljvisning:",
             options=employee_options,
-            index=default_idx,
             format_func=lambda x: "Ingen valgt" if x is None else x,
             key="employee_selector",
         )
-        st.session_state.pending_selected_employee_hash = None
 
         if new_selected_employee != st.session_state.get("selected_employee"):
             st.session_state.selected_employee = new_selected_employee

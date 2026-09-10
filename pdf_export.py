@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
@@ -43,7 +43,7 @@ def _format_kr(value) -> str:
 def _render_chart(
     employee_row, code_clean_df, is_outlier: bool, fit: dict | None, x_col: str, x_label: str, show_axis_values: bool
 ) -> io.BytesIO:
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(13, 7))
 
     ax.scatter(
         code_clean_df[x_col],
@@ -114,12 +114,16 @@ def build_employee_pdf(
     x_axes = x_axes or [("Ansiennitet (År)", "Ansiennitet (år)")]
 
     styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("CompactTitle", parent=styles["Title"], fontSize=16, leading=19, spaceAfter=4)
+    heading_style = ParagraphStyle(
+        "CompactHeading2", parent=styles["Heading2"], fontSize=12, leading=14, spaceBefore=2, spaceAfter=3
+    )
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=0.8 * cm, bottomMargin=0.8 * cm)
     elements = []
 
-    elements.append(Paragraph(f"Lønnsanalyse: {employee_row['Fullt Navn']}", styles["Title"]))
-    elements.append(Spacer(1, 0.4 * cm))
+    elements.append(Paragraph(f"Lønnsanalyse: {employee_row['Fullt Navn']}", title_style))
+    elements.append(Spacer(1, 0.25 * cm))
 
     personalia_rows = [
         ["Navn", employee_row["Fullt Navn"]],
@@ -137,28 +141,29 @@ def build_employee_pdf(
         TableStyle(
             [
                 ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 1),
                 ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.lightgrey),
             ]
         )
     )
     elements.append(personalia_table)
-    elements.append(Spacer(1, 0.6 * cm))
+    elements.append(Spacer(1, 0.2 * cm))
 
     for x_col, x_label in x_axes:
         if x_col not in code_clean_df.columns or pd.isna(employee_row.get(x_col)):
             elements.append(
                 Paragraph(f"Mangler verdi for {x_label.lower()} - kan ikke vise denne figuren.", styles["Italic"])
             )
-            elements.append(Spacer(1, 0.4 * cm))
+            elements.append(Spacer(1, 0.25 * cm))
             continue
 
         fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
 
-        elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", styles["Heading2"]))
+        elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", heading_style))
         chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"])
-        elements.append(Image(chart_buf, width=16 * cm, height=9.14 * cm))
-        elements.append(Spacer(1, 0.4 * cm))
+        elements.append(Image(chart_buf, width=13 * cm, height=7 * cm))
+        elements.append(Spacer(1, 0.12 * cm))
 
         if fit and not is_outlier and options["show_avvik_text"]:
             avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row[x_col])
@@ -174,11 +179,11 @@ def build_employee_pdf(
                     styles["Normal"],
                 )
             )
-            elements.append(Spacer(1, 0.4 * cm))
+            elements.append(Spacer(1, 0.25 * cm))
 
     stats_fields = [f for f in options["stats_fields"] if f in dict(KEY_LABELS)]
     if stats_fields:
-        elements.append(Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", styles["Heading2"]))
+        elements.append(Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", heading_style))
         stats = summary_stats(code_clean_df)
         label_lookup = dict(KEY_LABELS)
         stats_rows = [["Nøkkeltall", "Verdi"]] + [
@@ -192,7 +197,8 @@ def build_employee_pdf(
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f5")),
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                     ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
                 ]
             )
         )
