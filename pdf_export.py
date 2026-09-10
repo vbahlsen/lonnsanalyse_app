@@ -167,6 +167,7 @@ def build_employee_pdf(
     elements.append(personalia_table)
     elements.append(Spacer(1, 0.2 * cm))
 
+    figure_number = 0
     for x_col, x_label in x_axes:
         if x_col not in code_clean_df.columns or pd.isna(employee_row.get(x_col)):
             elements.append(
@@ -175,6 +176,7 @@ def build_employee_pdf(
             elements.append(Spacer(1, 0.25 * cm))
             continue
 
+        figure_number += 1
         fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
 
         elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", heading_style))
@@ -188,8 +190,8 @@ def build_employee_pdf(
         elements.append(Spacer(1, 0.06 * cm))
         elements.append(
             Paragraph(
-                f"Regresjonsanalyse av lønn i 100 % stillinger for stillingskode {employee_row['Stillingskode']}, "
-                f"som funksjon av {x_label.lower()}.",
+                f"<b>Figur {figure_number}:</b> Regresjonsanalyse av lønn i 100 % stillinger for stillingskode "
+                f"{employee_row['Stillingskode']}, som funksjon av {x_label.lower()}.",
                 caption_style,
             )
         )
