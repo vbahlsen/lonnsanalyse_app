@@ -107,11 +107,11 @@ def build_employee_pdf(
     code_clean_df,
     unit_col: str | None,
     is_outlier: bool,
-    x_col: str = "Ansiennitet (År)",
-    x_label: str = "Ansiennitet (år)",
+    x_axes: list[tuple[str, str]] | None = None,
     pdf_options: dict | None = None,
 ) -> bytes:
     options = {**DEFAULT_PDF_OPTIONS, **(pdf_options or {})}
+    x_axes = x_axes or [("Ansiennitet (År)", "Ansiennitet (år)")]
 
     styles = getSampleStyleSheet()
     buf = io.BytesIO()
@@ -145,28 +145,36 @@ def build_employee_pdf(
     elements.append(personalia_table)
     elements.append(Spacer(1, 0.6 * cm))
 
-    fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
-
-    elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", styles["Heading2"]))
-    chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"])
-    elements.append(Image(chart_buf, width=16 * cm, height=9.14 * cm))
-    elements.append(Spacer(1, 0.4 * cm))
-
-    if fit and not is_outlier and options["show_avvik_text"]:
-        avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row[x_col])
-        retning = "over" if avvik > 0 else "under" if avvik < 0 else "på"
-        z_text = ""
-        if fit["std_residual"] and fit["std_residual"] > 1e-9:
-            z = abs(avvik) / fit["std_residual"]
-            z_text = f", tilsvarende {z:.1f} standardavvik {retning} trendlinjen"
-        elements.append(
-            Paragraph(
-                f"Avvik fra trendlinje: {_format_kr(abs(avvik))} {retning} forventet lønnsnivå for "
-                f"{x_label.lower()} og stillingskode{z_text}.",
-                styles["Normal"],
+    for x_col, x_label in x_axes:
+        if x_col not in code_clean_df.columns or pd.isna(employee_row.get(x_col)):
+            elements.append(
+                Paragraph(f"Mangler verdi for {x_label.lower()} - kan ikke vise denne figuren.", styles["Italic"])
             )
-        )
+            elements.append(Spacer(1, 0.4 * cm))
+            continue
+
+        fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
+
+        elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", styles["Heading2"]))
+        chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"])
+        elements.append(Image(chart_buf, width=16 * cm, height=9.14 * cm))
         elements.append(Spacer(1, 0.4 * cm))
+
+        if fit and not is_outlier and options["show_avvik_text"]:
+            avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row[x_col])
+            retning = "over" if avvik > 0 else "under" if avvik < 0 else "på"
+            z_text = ""
+            if fit["std_residual"] and fit["std_residual"] > 1e-9:
+                z = abs(avvik) / fit["std_residual"]
+                z_text = f", tilsvarende {z:.1f} standardavvik {retning} trendlinjen"
+            elements.append(
+                Paragraph(
+                    f"Avvik fra trendlinje: {_format_kr(abs(avvik))} {retning} forventet lønnsnivå for "
+                    f"{x_label.lower()} og stillingskode{z_text}.",
+                    styles["Normal"],
+                )
+            )
+            elements.append(Spacer(1, 0.4 * cm))
 
     stats_fields = [f for f in options["stats_fields"] if f in dict(KEY_LABELS)]
     if stats_fields:
@@ -211,8 +219,7 @@ def build_export_zip(
     outliers_by_code: dict,
     hash_col: str,
     unit_col: str | None,
-    x_col: str = "Ansiennitet (År)",
-    x_label: str = "Ansiennitet (år)",
+    x_axes: list[tuple[str, str]] | None = None,
     pdf_options: dict | None = None,
 ) -> bytes:
     from analysis import non_outlier_rows
@@ -227,7 +234,7 @@ def build_export_zip(
             is_outlier = employee_row[hash_col] in set(outliers_by_code.get(str(stillingskode), []))
 
             pdf_bytes = build_employee_pdf(
-                employee_row, code_clean_df, unit_col, is_outlier, x_col, x_label, pdf_options
+                employee_row, code_clean_df, unit_col, is_outlier, x_axes, pdf_options
             )
 
             base_name = _sanitize_filename(full_name)

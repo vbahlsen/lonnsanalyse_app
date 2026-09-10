@@ -40,6 +40,7 @@ DEFAULT_PDF_OPTIONS = {
     "stats_fields": ["min", "q1", "median", "mean", "q3", "max", "std"],
     "show_axis_values": True,
     "show_avvik_text": True,
+    "pdf_x_axis_mode": "tiltredelse",
 }
 
 
