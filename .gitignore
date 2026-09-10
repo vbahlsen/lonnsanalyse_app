@@ -1,0 +1,16 @@
+# Oppgjør-konfigurasjon (filstier, outlier-hasher) - skal ikke i git
+oppgjor/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Lokal dev-tool-konfigurasjon (inneholder absolutte stier)
+.claude/
+
+# Vern mot at ekte lønnsdata havner i repoet ved uhell
+*.xlsx
+*.xls
+!test_*.xlsx
