@@ -1,3 +1,5 @@
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -81,7 +83,7 @@ if current_name != picked:
     stale_keys = (
         "file_path_widget", "employee_selector", "column_selector", "export_selection",
         "stillingskode_filter", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
-        "pdf_x_axis_mode_radio",
+        "pdf_x_axis_mode_radio", "pdf_report_date",
     )
     for key in list(st.session_state.keys()):
         if key in stale_keys or key.startswith(stale_prefixes) or key.startswith("_union_zip_"):
@@ -552,6 +554,19 @@ try:
             key="pdf_show_avvik_text",
         )
 
+        saved_report_date = st.session_state.pdf_options.get("report_date")
+        try:
+            default_report_date = date.fromisoformat(saved_report_date) if saved_report_date else date.today()
+        except ValueError:
+            default_report_date = date.today()
+        report_date_value = st.date_input(
+            "Lønnsdata per dato (vises i PDF-en):",
+            value=default_report_date,
+            format="DD/MM/YYYY",
+            key="pdf_report_date",
+        )
+        report_date_str = report_date_value.strftime("%d/%m-%Y")
+
         pdf_x_axis_mode = "tiltredelse"
         if position_seniority_col:
             mode_options = ["tiltredelse", "stillingsansiennitet", "begge"]
@@ -575,6 +590,7 @@ try:
             "show_axis_values": show_axis_values,
             "show_avvik_text": show_avvik_text,
             "pdf_x_axis_mode": pdf_x_axis_mode,
+            "report_date": report_date_value.isoformat(),
         }
 
     pdf_options = st.session_state.pdf_options
@@ -599,7 +615,8 @@ try:
                 if st.button(f"📄 Generer for alle {uv}-medlemmer ({len(members)} stk)", key=f"union_export_btn_{uv}"):
                     with st.spinner(f"Genererer PDF-rapporter for {uv}..."):
                         zip_bytes = build_export_zip(
-                            members, df, st.session_state.outliers_by_code, "_hash", unit_col, pdf_x_axes, pdf_options
+                            members, df, st.session_state.outliers_by_code, "_hash", unit_col,
+                            pdf_x_axes, pdf_options, report_date_str,
                         )
                     st.session_state[f"_union_zip_{uv}"] = zip_bytes
             with dl_col:
@@ -630,7 +647,8 @@ try:
     if st.button("Generer PDF-rapporter", disabled=not export_selection):
         with st.spinner("Genererer PDF-rapporter..."):
             zip_bytes = build_export_zip(
-                export_selection, df, st.session_state.outliers_by_code, "_hash", unit_col, pdf_x_axes, pdf_options
+                export_selection, df, st.session_state.outliers_by_code, "_hash", unit_col,
+                pdf_x_axes, pdf_options, report_date_str,
             )
         st.session_state["_export_zip_bytes"] = zip_bytes
 

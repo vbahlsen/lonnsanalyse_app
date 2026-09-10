@@ -109,6 +109,7 @@ def build_employee_pdf(
     is_outlier: bool,
     x_axes: list[tuple[str, str]] | None = None,
     pdf_options: dict | None = None,
+    report_date: str | None = None,
 ) -> bytes:
     options = {**DEFAULT_PDF_OPTIONS, **(pdf_options or {})}
     x_axes = x_axes or [("Ansiennitet (År)", "Ansiennitet (år)")]
@@ -118,12 +119,28 @@ def build_employee_pdf(
     heading_style = ParagraphStyle(
         "CompactHeading2", parent=styles["Heading2"], fontSize=12, leading=14, spaceBefore=2, spaceAfter=3
     )
+    subheader_style = ParagraphStyle(
+        "Subheader", parent=styles["Normal"], fontSize=9.5, leading=12, textColor=colors.HexColor("#444444")
+    )
+    caption_style = ParagraphStyle(
+        "FigureCaption", parent=styles["Normal"], fontSize=7.5, leading=9, textColor=colors.HexColor("#6b6b6b")
+    )
+
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=0.8 * cm, bottomMargin=0.8 * cm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=0.6 * cm, bottomMargin=0.6 * cm)
     elements = []
 
     elements.append(Paragraph(f"Lønnsanalyse: {employee_row['Fullt Navn']}", title_style))
-    elements.append(Spacer(1, 0.25 * cm))
+
+    if report_date:
+        elements.append(
+            Paragraph(
+                f"Statistikk fra din stillingskode basert på lønnsdata per {report_date}, til bruk i årets "
+                "lokale lønnsforhandling. Alle lønnsnivåer oppgitt i 100% stillinger.",
+                subheader_style,
+            )
+        )
+    elements.append(Spacer(1, 0.18 * cm))
 
     personalia_rows = [
         ["Navn", employee_row["Fullt Navn"]],
@@ -162,8 +179,21 @@ def build_employee_pdf(
 
         elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", heading_style))
         chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"])
-        elements.append(Image(chart_buf, width=13 * cm, height=7 * cm))
-        elements.append(Spacer(1, 0.12 * cm))
+        if options["show_avvik_text"]:
+            img_width, img_height = 13 * cm, 7 * cm
+        else:
+            # Mer plass å ta av når avviksforklaringen er slått av - gjør figuren litt større.
+            img_width, img_height = 13.5 * cm, 7.27 * cm
+        elements.append(Image(chart_buf, width=img_width, height=img_height))
+        elements.append(Spacer(1, 0.06 * cm))
+        elements.append(
+            Paragraph(
+                f"Regresjonsanalyse av lønn i 100 % stillinger for stillingskode {employee_row['Stillingskode']}, "
+                f"som funksjon av {x_label.lower()}.",
+                caption_style,
+            )
+        )
+        elements.append(Spacer(1, 0.14 * cm))
 
         if fit and not is_outlier and options["show_avvik_text"]:
             avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row[x_col])
@@ -227,6 +257,7 @@ def build_export_zip(
     unit_col: str | None,
     x_axes: list[tuple[str, str]] | None = None,
     pdf_options: dict | None = None,
+    report_date: str | None = None,
 ) -> bytes:
     from analysis import non_outlier_rows
 
@@ -240,7 +271,7 @@ def build_export_zip(
             is_outlier = employee_row[hash_col] in set(outliers_by_code.get(str(stillingskode), []))
 
             pdf_bytes = build_employee_pdf(
-                employee_row, code_clean_df, unit_col, is_outlier, x_axes, pdf_options
+                employee_row, code_clean_df, unit_col, is_outlier, x_axes, pdf_options, report_date
             )
 
             base_name = _sanitize_filename(full_name)
