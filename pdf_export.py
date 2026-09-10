@@ -6,6 +6,7 @@ import re
 import zipfile
 
 import matplotlib
+import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -15,7 +16,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from analysis import summary_stats
+from analysis import fit_linear_regression, summary_stats
 
 KEY_LABELS = [
     ("min", "Min"),
@@ -24,6 +25,7 @@ KEY_LABELS = [
     ("mean", "Gjennomsnitt"),
     ("q3", "3. kvartil (75%)"),
     ("max", "Max"),
+    ("std", "Standardavvik"),
 ]
 
 
@@ -36,7 +38,7 @@ def _format_kr(value) -> str:
     return f"kr {value:,.0f}".replace(",", " ")
 
 
-def _render_chart(employee_row, code_clean_df, is_outlier: bool) -> io.BytesIO:
+def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | None) -> io.BytesIO:
     fig, ax = plt.subplots(figsize=(14, 8))
 
     ax.scatter(
@@ -48,15 +50,16 @@ def _render_chart(employee_row, code_clean_df, is_outlier: bool) -> io.BytesIO:
         zorder=2,
     )
 
-    if len(code_clean_df) >= 2 and code_clean_df["Ansiennitet (År)"].nunique() >= 2:
-        from scipy.stats import linregress
-
-        slope, intercept, r_value, _, _ = linregress(
-            code_clean_df["Ansiennitet (År)"], code_clean_df["Årslønn"]
-        )
+    if fit:
         x_range = [code_clean_df["Ansiennitet (År)"].min(), code_clean_df["Ansiennitet (År)"].max()]
-        y_range = [intercept + slope * x for x in x_range]
-        ax.plot(x_range, y_range, color="black", linewidth=2, label=f"Trendlinje (R²={r_value**2:.2f})")
+        y_range = [fit["intercept"] + fit["slope"] * x for x in x_range]
+        ax.plot(x_range, y_range, color="black", linewidth=2, label=f"Trendlinje (R²={fit['r_squared']:.2f})")
+
+        std = fit["std_residual"]
+        if std and std > 1e-9:
+            upper = [y + 1.96 * std for y in y_range]
+            lower = [y - 1.96 * std for y in y_range]
+            ax.fill_between(x_range, lower, upper, color="black", alpha=0.08, label="95% referanseintervall")
 
     ax.scatter(
         [employee_row["Ansiennitet (År)"]],
@@ -103,12 +106,14 @@ def build_employee_pdf(employee_row, code_clean_df, unit_col: str | None, is_out
 
     personalia_rows = [
         ["Navn", employee_row["Fullt Navn"]],
+        ["Årslønn", _format_kr(employee_row["Årslønn"])],
         ["Stillingskode", str(employee_row["Stillingskode"])],
         ["Tiltredelsesdato", str(employee_row["Tiltredelsesdato"])],
-        ["Stillingsansiennitet", f"{employee_row['Ansiennitet (År)']:.1f} år"],
     ]
     if unit_col and unit_col in employee_row and not employee_row.isna().get(unit_col, True):
-        personalia_rows.insert(1, ["Ansattenhet", str(employee_row[unit_col])])
+        personalia_rows.insert(2, ["Ansattenhet", str(employee_row[unit_col])])
+    if "Stillingsansiennitet (År)" in employee_row.index and pd.notna(employee_row["Stillingsansiennitet (År)"]):
+        personalia_rows.append(["Stillingsansiennitet", f"{employee_row['Stillingsansiennitet (År)']:.1f} år"])
 
     personalia_table = Table(personalia_rows, colWidths=[5 * cm, 10 * cm])
     personalia_table.setStyle(
@@ -123,10 +128,28 @@ def build_employee_pdf(employee_row, code_clean_df, unit_col: str | None, is_out
     elements.append(personalia_table)
     elements.append(Spacer(1, 0.6 * cm))
 
+    fit = fit_linear_regression(code_clean_df["Ansiennitet (År)"], code_clean_df["Årslønn"])
+
     elements.append(Paragraph("Lønn vs. ansiennitet for stillingskoden", styles["Heading2"]))
-    chart_buf = _render_chart(employee_row, code_clean_df, is_outlier)
+    chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit)
     elements.append(Image(chart_buf, width=16 * cm, height=9.14 * cm))
     elements.append(Spacer(1, 0.4 * cm))
+
+    if fit and not is_outlier:
+        avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row["Ansiennitet (År)"])
+        retning = "over" if avvik > 0 else "under" if avvik < 0 else "på"
+        z_text = ""
+        if fit["std_residual"] and fit["std_residual"] > 1e-9:
+            z = abs(avvik) / fit["std_residual"]
+            z_text = f", tilsvarende {z:.1f} standardavvik {retning} trendlinjen"
+        elements.append(
+            Paragraph(
+                f"Avvik fra trendlinje: {_format_kr(abs(avvik))} {retning} forventet lønnsnivå for "
+                f"ansiennitet og stillingskode{z_text}.",
+                styles["Normal"],
+            )
+        )
+        elements.append(Spacer(1, 0.4 * cm))
 
     elements.append(Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", styles["Heading2"]))
     stats = summary_stats(code_clean_df)

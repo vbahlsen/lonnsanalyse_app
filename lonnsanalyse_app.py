@@ -7,6 +7,12 @@ import analysis
 import settlement_store as store
 from pdf_export import build_export_zip
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 st.set_page_config(layout="wide", page_title="Lønnsnivåanalyse mot Ansiennitet")
 st.title("💰 Lønnsnivåanalyse mot Ansiennitet")
 
@@ -128,9 +134,15 @@ try:
     rename_dict = {actual: logical for logical, actual in column_mapping.items() if actual != logical}
     df = df_raw.rename(columns=rename_dict)
     unit_col = analysis.detect_unit_column(df.columns.tolist())
+    position_seniority_col = analysis.detect_position_seniority_column(df.columns.tolist())
 
     df["Stillingskode"] = df["Stillingskode"].astype(str).str.strip()
     df["Ansiennitet (År)"] = df["Tiltredelsesdato"].apply(analysis.calculate_years_of_service)
+    if position_seniority_col:
+        # Stillingsansiennitet er IKKE det samme som år siden Tiltredelsesdato - den kommer
+        # fra en egen kolonne, siden en ansatt kan ha vært lenger i virksomheten enn i
+        # nåværende stilling (f.eks. etter et opprykk).
+        df["Stillingsansiennitet (År)"] = df[position_seniority_col].apply(analysis.calculate_years_of_service)
     df["Fullt Navn"] = df["Fornavn"].astype(str) + " " + df["Etternavn"].astype(str)
     df["Årslønn"] = pd.to_numeric(df["Årslønn"], errors="coerce")
 
@@ -194,6 +206,7 @@ try:
         else:
             median_lonn = clean_filtered_df["Årslønn"].median()
             mean_lonn = clean_filtered_df["Årslønn"].mean()
+            std_lonn = clean_filtered_df["Årslønn"].std()
             q1 = clean_filtered_df["Årslønn"].quantile(0.25)
             q3 = clean_filtered_df["Årslønn"].quantile(0.75)
 
@@ -201,11 +214,14 @@ try:
             st.markdown(f"**Antall ansatte (ekskl. outliers):** {len(clean_filtered_df)}")
             st.markdown(f"**Median Årslønn:** kr {median_lonn:,.0f}".replace(",", " "))
             st.markdown(f"**Gjennomsnitt:** kr {mean_lonn:,.0f}".replace(",", " "))
+            if pd.notna(std_lonn):
+                st.markdown(f"**Standardavvik:** kr {std_lonn:,.0f}".replace(",", " "))
             st.markdown(f"**Kvartil 1 (25%):** kr {q1:,.0f}".replace(",", " "))
             st.markdown(f"**Kvartil 3 (75%):** kr {q3:,.0f}".replace(",", " "))
 
         st.markdown("---")
         st.markdown("**Regresjon per stillingskode (outliers ekskludert):**")
+        st.caption("Std.avvik = spredningen (residualene) rundt trendlinjen - brukes til 95%-referanseintervallet i grafen.")
         reg_table = []
         for kode in selected_codes:
             r = reg_results.get(kode)
@@ -216,10 +232,19 @@ try:
                         "N": r["n"],
                         "Stigning (kr/år)": f"{r['slope']:,.0f}".replace(",", " "),
                         "R²": f"{r['r_squared']:.2f}",
+                        "Std.avvik (kr)": f"{r['std_residual']:,.0f}".replace(",", " "),
                     }
                 )
             else:
-                reg_table.append({"Stillingskode": kode, "N": r["n"] if r else 0, "Stigning (kr/år)": "–", "R²": "–"})
+                reg_table.append(
+                    {
+                        "Stillingskode": kode,
+                        "N": r["n"] if r else 0,
+                        "Stigning (kr/år)": "–",
+                        "R²": "–",
+                        "Std.avvik (kr)": "–",
+                    }
+                )
         st.dataframe(pd.DataFrame(reg_table), hide_index=True, use_container_width=True)
 
         employee_names = filtered_df.sort_values(by="Etternavn")["Fullt Navn"].tolist()
@@ -249,6 +274,12 @@ try:
     with col_plot:
         st.subheader("📈 Lønn vs. Ansiennitet med Regresjon per Stillingskode")
 
+        show_band = st.checkbox(
+            "Vis 95% referanseintervall rundt trendlinjene",
+            value=True,
+            help="Bånd på ±1,96 standardavvik (residualer) rundt hver trendlinje - viser normalspredningen for stillingskoden.",
+        )
+
         plot_df = filtered_df.copy()
         plot_df["Farge"] = plot_df["Stillingskode"].astype(str)
         plot_df["Størrelse"] = plot_df["Is Outlier"].map({True: 8, False: 12})
@@ -258,6 +289,9 @@ try:
             sel_mask = plot_df["Fullt Navn"] == st.session_state.selected_employee
             plot_df.loc[sel_mask, "Farge"] = "🔴 VALGT ANSATT"
             plot_df.loc[sel_mask, "Størrelse"] = 20
+
+        palette = px.colors.qualitative.Dark24
+        code_color_map = {str(kode): palette[i % len(palette)] for i, kode in enumerate(selected_codes)}
 
         fig = px.scatter(
             plot_df,
@@ -269,7 +303,7 @@ try:
             symbol_map={"circle-open": "circle-open", "circle": "circle"},
             hover_data=["Fullt Navn", "Stillingskode", "Is Outlier", "Lønnsavvik (Kr)"],
             title="Årslønn mot Ansiennitet (åpen sirkel = markert outlier)",
-            color_discrete_map={"🔴 VALGT ANSATT": "red"},
+            color_discrete_map={"🔴 VALGT ANSATT": "red", **code_color_map},
         )
 
         for kode in selected_codes:
@@ -279,14 +313,28 @@ try:
             code_points = clean_filtered_df[clean_filtered_df["Stillingskode"] == kode]
             if code_points.empty:
                 continue
+            line_color = code_color_map[str(kode)]
             x_range = np.linspace(code_points["Ansiennitet (År)"].min(), code_points["Ansiennitet (År)"].max(), 50)
             y_range = r["intercept"] + r["slope"] * x_range
+
+            if show_band and r["std_residual"] and r["std_residual"] > 1e-9:
+                band = 1.96 * r["std_residual"]
+                fig.add_scatter(
+                    x=x_range, y=y_range + band, mode="lines", line=dict(width=0),
+                    showlegend=False, hoverinfo="skip",
+                )
+                fig.add_scatter(
+                    x=x_range, y=y_range - band, mode="lines", line=dict(width=0),
+                    fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.12),
+                    name=f"95% referanseintervall {kode}", showlegend=False, hoverinfo="skip",
+                )
+
             fig.add_scatter(
                 x=x_range,
                 y=y_range,
                 mode="lines",
                 name=f"Trend {kode} (R²={r['r_squared']:.2f})",
-                line=dict(width=2),
+                line=dict(width=2, color=line_color),
             )
 
         fig.update_layout(height=600)
@@ -349,12 +397,17 @@ try:
                 st.warning("Ansatt er markert som outlier for sin stillingskode og inngår ikke i regresjons- eller nøkkeltallsberegningen.")
             else:
                 avvik = selected_row["Lønnsavvik (Kr)"]
+                std_residual = reg_results.get(stillingskode, {}).get("std_residual")
+                z_suffix = ""
+                if pd.notna(avvik) and std_residual and std_residual > 1e-9:
+                    z_suffix = f" (tilsvarer {abs(avvik) / std_residual:.1f} standardavvik)"
+
                 if pd.isna(avvik):
                     st.info("For få datapunkter i denne stillingskoden til å beregne forventet lønn.")
                 elif avvik > 0:
-                    st.success(f"Ansatt ligger **{avvik:,.0f} kr** over trendlinjen for sin ansiennitet og stillingskode.".replace(",", " "))
+                    st.success(f"Ansatt ligger **{avvik:,.0f} kr** over trendlinjen for sin ansiennitet og stillingskode{z_suffix}.".replace(",", " "))
                 elif avvik < 0:
-                    st.error(f"Ansatt ligger **{abs(avvik):,.0f} kr** under trendlinjen for sin ansiennitet og stillingskode.".replace(",", " "))
+                    st.error(f"Ansatt ligger **{abs(avvik):,.0f} kr** under trendlinjen for sin ansiennitet og stillingskode{z_suffix}.".replace(",", " "))
                 else:
                     st.info("Ansatt ligger nøyaktig på trendlinjen.")
 

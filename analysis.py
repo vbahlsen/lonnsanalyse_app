@@ -8,6 +8,7 @@ from scipy.stats import linregress
 
 REQUIRED_COLUMNS = ["Etternavn", "Fornavn", "Stillingskode", "Tiltredelsesdato", "Årslønn"]
 OPTIONAL_UNIT_SYNONYMS = ["Ansattenhet", "Enhet", "Avdeling"]
+OPTIONAL_POSITION_SENIORITY_SYNONYMS = ["Stillingsansiennitet"]
 
 
 def calculate_years_of_service(start_date):
@@ -81,13 +82,48 @@ def detect_unit_column(df_columns: list[str]) -> str | None:
     return None
 
 
+def detect_position_seniority_column(df_columns: list[str]) -> str | None:
+    """Finner en egen 'Stillingsansiennitet'-kolonne (dato), hvis den finnes.
+
+    Dette er IKKE det samme som Tiltredelsesdato - en ansatt kan ha vært i
+    virksomheten lenge, men hatt kortere ansiennitet i nåværende stilling
+    etter et opprykk. Kolonnen forventes å inneholde en dato (samme formater
+    som Tiltredelsesdato), som konverteres til år på samme måte.
+    """
+    lower_lookup = {col.lower(): col for col in df_columns}
+    for synonym in OPTIONAL_POSITION_SENIORITY_SYNONYMS:
+        if synonym.lower() in lower_lookup:
+            return lower_lookup[synonym.lower()]
+    return None
+
+
+def fit_linear_regression(x: pd.Series, y: pd.Series) -> dict | None:
+    """Kjører OLS-regresjon og returnerer slope/intercept/r_squared/std_residual/n.
+
+    Returnerer None hvis det er for få punkter eller ingen variasjon i x
+    (f.eks. alle har identisk ansiennitet) - da kan ingen trendlinje beregnes.
+    """
+    if len(x) < 2 or x.nunique() < 2:
+        return None
+
+    slope, intercept, r_value, _, _ = linregress(x, y)
+    residuals = y - (intercept + slope * x)
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r_squared": r_value**2,
+        "std_residual": residuals.std(),
+        "n": len(x),
+    }
+
+
 def run_regression_per_code(df: pd.DataFrame, outliers_by_code: dict[str, list[str]], hash_col: str = "_hash") -> dict:
     """Kjører separat lineær regresjon (Årslønn vs. Ansiennitet) per stillingskode.
 
     Outliers (identifisert via hash_col mot outliers_by_code) ekskluderes fra
     regresjonen for sin stillingskode. Returnerer et dict per kode med
-    slope/intercept/r_squared/n, og skriver 'Forventet Lønn' / 'Lønnsavvik (Kr)'
-    inn i df for radene som inngikk i en gyldig regresjon.
+    slope/intercept/r_squared/std_residual/n, og skriver 'Forventet Lønn' /
+    'Lønnsavvik (Kr)' inn i df for radene som inngikk i en gyldig regresjon.
     """
     results = {}
     df["Forventet Lønn"] = pd.NA
@@ -97,22 +133,16 @@ def run_regression_per_code(df: pd.DataFrame, outliers_by_code: dict[str, list[s
         outlier_hashes = set(outliers_by_code.get(str(kode), []))
         clean = group[~group[hash_col].isin(outlier_hashes)]
 
-        if len(clean) < 2 or clean["Ansiennitet (År)"].nunique() < 2:
+        fit = fit_linear_regression(clean["Ansiennitet (År)"], clean["Årslønn"])
+        if fit is None:
             # For få datapunkter, eller alle har samme ansiennitet (f.eks. tilfeldig
             # identisk tiltredelsesdato i en liten gruppe) - kan ikke regne trendlinje
             # for denne stillingskoden, men resten av appen skal fortsatt fungere.
-            results[kode] = {"slope": None, "intercept": None, "r_squared": None, "n": len(clean)}
+            results[kode] = {"slope": None, "intercept": None, "r_squared": None, "std_residual": None, "n": len(clean)}
             continue
 
-        slope, intercept, r_value, _, _ = linregress(clean["Ansiennitet (År)"], clean["Årslønn"])
-        results[kode] = {
-            "slope": slope,
-            "intercept": intercept,
-            "r_squared": r_value**2,
-            "n": len(clean),
-        }
-
-        expected = intercept + slope * group["Ansiennitet (År)"]
+        results[kode] = fit
+        expected = fit["intercept"] + fit["slope"] * group["Ansiennitet (År)"]
         df.loc[group.index, "Forventet Lønn"] = expected
         df.loc[group.index, "Lønnsavvik (Kr)"] = group["Årslønn"] - expected
 
@@ -120,7 +150,7 @@ def run_regression_per_code(df: pd.DataFrame, outliers_by_code: dict[str, list[s
 
 
 def summary_stats(code_df: pd.DataFrame) -> dict:
-    """Nøkkeltall (min/Q1/median/mean/Q3/max) for Årslønn i en gruppe."""
+    """Nøkkeltall (min/Q1/median/mean/Q3/max/std) for Årslønn i en gruppe."""
     salaries = code_df["Årslønn"]
     return {
         "min": salaries.min(),
@@ -129,6 +159,7 @@ def summary_stats(code_df: pd.DataFrame) -> dict:
         "mean": salaries.mean(),
         "q3": salaries.quantile(0.75),
         "max": salaries.max(),
+        "std": salaries.std(),
         "n": len(code_df),
     }
 
