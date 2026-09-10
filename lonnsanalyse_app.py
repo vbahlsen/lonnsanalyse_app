@@ -5,7 +5,10 @@ import streamlit as st
 
 import analysis
 import settlement_store as store
-from pdf_export import build_export_zip
+from pdf_export import KEY_LABELS, build_export_zip
+
+UNION_HIGHLIGHT_COLORS = ["#17BECF", "#2CA8A4", "#00CED1", "#20B2AA", "#48D1CC"]
+
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     hex_color = hex_color.lstrip("#")
@@ -13,7 +16,31 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-st.set_page_config(layout="wide", page_title="Lønnsnivåanalyse mot Ansiennitet")
+def _guess_initial_sidebar_state() -> str:
+    """Sidebaren skal starte lukket når vi allerede har lastet data denne
+    økten, eller når det aktive (eller sist brukte) oppgjøret har en kjent
+    filsti som faktisk finnes på disk - ellers åpen, slik at brukeren finner
+    fil-/oppgjør-kontrollene."""
+    if st.session_state.get("data_loaded_ok"):
+        return "collapsed"
+    name = st.session_state.get("settlement_name")
+    if not name:
+        existing = store.list_settlements()
+        name = existing[0] if existing else None
+    if name:
+        settlement = store.load_settlement(name)
+        if store.resolve_data_file(settlement.get("file_path")):
+            return "collapsed"
+    return "expanded"
+
+
+st.set_page_config(
+    layout="wide", page_title="Lønnsnivåanalyse mot Ansiennitet", initial_sidebar_state=_guess_initial_sidebar_state()
+)
+st.markdown(
+    "<style>h3 {font-size: 1.3rem !important;} h4 {font-size: 1.1rem !important;}</style>",
+    unsafe_allow_html=True,
+)
 st.title("💰 Lønnsnivåanalyse mot Ansiennitet")
 
 # --- OPPGJØR-VELGER ---
@@ -48,12 +75,15 @@ if picked == "-- Nytt oppgjør --":
 if current_name != picked:
     # Fjern widget-tilstand fra forrige oppgjør. Streamlit gjenbruker en widgets verdi
     # på tvers av script-kjøringer så lenge nøkkelen finnes i session_state, uavhengig av
-    # hvilken "value"/"index" vi sender inn - uten dette ville f.eks. filsti, valgt ansatt
-    # og outlier-avkrysninger fra forrige oppgjør lekke inn i det nye.
-    stale_prefixes = ("outlier_toggle_", "map_")
-    stale_keys = ("file_path_widget", "employee_selector", "column_selector", "export_selection")
+    # hvilken "value"/"index" vi sender inn - uten dette ville f.eks. filsti, valgt ansatt,
+    # stillingskode-filter og outlier-avkrysninger fra forrige oppgjør lekke inn i det nye.
+    stale_prefixes = ("outlier_toggle_", "map_", "union_highlight_", "union_export_btn_", "union_dl_")
+    stale_keys = (
+        "file_path_widget", "employee_selector", "column_selector", "export_selection",
+        "stillingskode_filter", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
+    )
     for key in list(st.session_state.keys()):
-        if key in stale_keys or key.startswith(stale_prefixes):
+        if key in stale_keys or key.startswith(stale_prefixes) or key.startswith("_union_zip_"):
             del st.session_state[key]
 
     settlement = store.load_settlement(picked)
@@ -62,9 +92,12 @@ if current_name != picked:
     st.session_state.column_mapping = settlement.get("column_mapping")
     st.session_state.file_path_input = settlement.get("file_path") or ""
     st.session_state.display_columns = settlement.get("display_columns") or analysis.REQUIRED_COLUMNS
+    st.session_state.x_axis_choice = settlement.get("x_axis_choice") or "Ansiennitet (År)"
+    st.session_state.pdf_options = settlement.get("pdf_options") or dict(store.DEFAULT_PDF_OPTIONS)
     st.session_state.pending_selected_employee_hash = settlement.get("last_selected_employee_hash")
     st.session_state.pending_selected_codes = settlement.get("selected_codes")
     st.session_state.selected_employee = None
+    st.session_state.data_loaded_ok = False
     st.session_state.pop("_export_zip_bytes", None)
     st.rerun()
 
@@ -75,6 +108,8 @@ st.session_state.setdefault("outliers_by_code", {})
 st.session_state.setdefault("column_mapping", None)
 st.session_state.setdefault("file_path_input", "")
 st.session_state.setdefault("display_columns", analysis.REQUIRED_COLUMNS)
+st.session_state.setdefault("x_axis_choice", "Ansiennitet (År)")
+st.session_state.setdefault("pdf_options", dict(store.DEFAULT_PDF_OPTIONS))
 st.session_state.setdefault("selected_employee", None)
 
 # --- DATAFIL ---
@@ -84,21 +119,29 @@ path_input = st.sidebar.text_input(
     "Filsti til lønnsdata (Excel)",
     value=st.session_state.file_path_input,
     key="file_path_widget",
-    help="Siden appen kjører lokalt kan den lese filen direkte fra disk og huske stien til neste økt.",
+    help="Siden appen kjører lokalt kan den lese filen direkte fra disk og huske stien til neste økt. "
+    "Fungerer også med sti limt inn via 'Kopier som bane' i Utforsker.",
 )
 
 df_raw = None
 
-if path_input.strip():
-    resolved = store.resolve_data_file(path_input.strip())
+cleaned_path = store.clean_path_string(path_input)
+if cleaned_path:
+    resolved = store.resolve_data_file(cleaned_path)
     if resolved:
         try:
             df_raw = pd.read_excel(resolved)
             st.session_state.file_path_input = str(resolved)
+            if path_input.strip() != str(resolved):
+                # Feltet viser fortsatt det brukeren limte inn (f.eks. med anførselstegn
+                # fra "Kopier som bane") siden en widgets verdi ikke kan overstyres etter at
+                # den er instansiert i samme kjøring - rydd opp visningen på neste kjøring.
+                st.session_state.pop("file_path_widget", None)
+                st.rerun()
         except Exception as e:
             st.sidebar.error(f"Klarte ikke å lese filen: {e}")
     else:
-        st.sidebar.warning(f"Finner ikke filen på oppgitt sti:\n\n`{path_input}`\n\nSjekk stien, eller last opp filen manuelt under.")
+        st.sidebar.warning(f"Finner ikke filen på oppgitt sti:\n\n`{cleaned_path}`\n\nSjekk stien, eller last opp filen manuelt under.")
 
 if df_raw is None:
     uploaded_file = st.sidebar.file_uploader("...eller last opp Excel-fil manuelt:", type=["xlsx", "xls"])
@@ -107,6 +150,7 @@ if df_raw is None:
         st.sidebar.info("Lastet opp manuelt. Oppgi filstien i feltet over for at appen skal huske filen til neste økt.")
 
 if df_raw is None:
+    st.session_state.data_loaded_ok = False
     st.info("Oppgi filsti eller last opp Excel-fil for å starte analysen.")
     st.stop()
 
@@ -135,6 +179,7 @@ try:
     df = df_raw.rename(columns=rename_dict)
     unit_col = analysis.detect_unit_column(df.columns.tolist())
     position_seniority_col = analysis.detect_position_seniority_column(df.columns.tolist())
+    union_col = analysis.detect_union_column(df.columns.tolist())
 
     df["Stillingskode"] = df["Stillingskode"].astype(str).str.strip()
     df["Ansiennitet (År)"] = df["Tiltredelsesdato"].apply(analysis.calculate_years_of_service)
@@ -161,13 +206,7 @@ try:
         axis=1,
     )
 
-    # --- REGRESJON PER STILLINGSKODE (alltid på hele datasettet) ---
-
-    reg_results = analysis.run_regression_per_code(df, st.session_state.outliers_by_code, hash_col="_hash")
-
-    # --- SIDEPANEL FILTER ---
-
-    st.sidebar.header("Filter & Innstillinger")
+    # --- FILTER OG X-AKSE-VALG (hovedsiden, ikke sidepanel) ---
 
     all_codes = sorted(df["Stillingskode"].unique(), key=str)
     pending_codes = st.session_state.get("pending_selected_codes")
@@ -175,12 +214,33 @@ try:
     if not default_codes:
         default_codes = all_codes
 
-    selected_codes = st.sidebar.multiselect(
-        "Velg Stillingskode(r) for analyse (kun visning - regresjon kjøres alltid per kode):",
+    selected_codes = st.multiselect(
+        "Velg Stillingskode(r) for visning (regresjon kjøres alltid per kode, på hele datasettet):",
         options=all_codes,
         default=default_codes,
+        key="stillingskode_filter",
     )
     st.session_state.pending_selected_codes = None
+
+    x_col = "Ansiennitet (År)"
+    x_label = "Ansiennitet (år) siden tiltredelse"
+    if position_seniority_col:
+        x_choice_options = ["Ansiennitet (År)", "Stillingsansiennitet (År)"]
+        default_x_idx = x_choice_options.index(st.session_state.x_axis_choice) if st.session_state.x_axis_choice in x_choice_options else 0
+        x_col = st.radio(
+            "X-akse for regresjon:",
+            options=x_choice_options,
+            index=default_x_idx,
+            format_func=lambda v: "Ansiennitet siden tiltredelse" if v == "Ansiennitet (År)" else "Stillingsansiennitet",
+            horizontal=True,
+            key="x_axis_radio",
+        )
+        x_label = "Ansiennitet (år) siden tiltredelse" if x_col == "Ansiennitet (År)" else "Stillingsansiennitet (år)"
+        st.session_state.x_axis_choice = x_col
+
+    # --- REGRESJON PER STILLINGSKODE (alltid på hele datasettet) ---
+
+    reg_results = analysis.run_regression_per_code(df, st.session_state.outliers_by_code, x_col=x_col, hash_col="_hash")
 
     filtered_df = df[df["Stillingskode"].isin(selected_codes)].copy()
 
@@ -194,12 +254,129 @@ try:
     filtered_df["Is Outlier"] = filtered_df.apply(_is_outlier, axis=1)
     clean_filtered_df = filtered_df[~filtered_df["Is Outlier"]]
 
+    union_values = []
+    if union_col:
+        union_values = sorted(v for v in df[union_col].dropna().unique() if str(v).strip())
+
     # --- LAYOUT MED KOLONNER ---
+    # col_plot rendres FØR col_stats i koden (selv om col_stats vises til venstre) slik at et
+    # klikk i grafen kan nullstille "employee_selector" trygt før den widgeten instansieres
+    # denne kjøringen - Streamlit tillater ikke å endre en widgets session_state-verdi etter
+    # at den allerede er instansiert i samme kjøring.
 
     col_stats, col_plot = st.columns([1, 2])
 
+    with col_plot:
+        st.markdown("### 📈 Lønn vs. Ansiennitet med Regresjon per Stillingskode")
+        st.caption("Klikk på et punkt i grafen for å velge ansatt til detaljvisning.")
+
+        band_col, union_col_widgets = st.columns([1, 2])
+        with band_col:
+            show_band = st.checkbox(
+                "Vis 95% referanseintervall",
+                value=True,
+                help="Bånd på ±1,96 standardavvik (residualer) rundt hver trendlinje - viser normalspredningen for stillingskoden.",
+            )
+
+        union_highlight_selection = {}
+        if union_values:
+            with union_col_widgets:
+                st.caption("Uthev fagforeningsmedlemmer:")
+                union_widget_cols = st.columns(min(len(union_values), 3))
+                for i, uv in enumerate(union_values):
+                    with union_widget_cols[i % len(union_widget_cols)]:
+                        union_highlight_selection[uv] = st.checkbox(
+                            f"Uthev {uv}-medlemmer", key=f"union_highlight_{uv}"
+                        )
+
+        plot_df = filtered_df.copy()
+        plot_df["Farge"] = plot_df["Stillingskode"].astype(str)
+        plot_df["Størrelse"] = plot_df["Is Outlier"].map({True: 5, False: 7})
+        plot_df["Symbol"] = plot_df["Is Outlier"].map({True: "circle-open", False: "circle"})
+
+        palette = px.colors.qualitative.Dark24
+        code_color_map = {str(kode): palette[i % len(palette)] for i, kode in enumerate(selected_codes)}
+
+        union_color_map = {}
+        if union_col:
+            for i, uv in enumerate(union_values):
+                if union_highlight_selection.get(uv):
+                    mask = plot_df[union_col] == uv
+                    plot_df.loc[mask, "Farge"] = f"🟦 {uv}-medlem"
+                    union_color_map[f"🟦 {uv}-medlem"] = UNION_HIGHLIGHT_COLORS[i % len(UNION_HIGHLIGHT_COLORS)]
+
+        currently_selected = st.session_state.get("selected_employee")
+        if currently_selected:
+            sel_mask = plot_df["Fullt Navn"] == currently_selected
+            plot_df.loc[sel_mask, "Farge"] = "🔴 VALGT ANSATT"
+            plot_df.loc[sel_mask, "Størrelse"] = 13
+
+        fig = px.scatter(
+            plot_df,
+            x=x_col,
+            y="Årslønn",
+            color="Farge",
+            size="Størrelse",
+            symbol="Symbol",
+            symbol_map={"circle-open": "circle-open", "circle": "circle"},
+            custom_data=["Fullt Navn"],
+            hover_data=["Fullt Navn", "Stillingskode", "Is Outlier", "Lønnsavvik (Kr)"],
+            title="Årslønn mot ansiennitet (åpen sirkel = markert outlier)",
+            color_discrete_map={"🔴 VALGT ANSATT": "red", **code_color_map, **union_color_map},
+        )
+
+        for kode in selected_codes:
+            r = reg_results.get(kode)
+            if not r or r["slope"] is None:
+                continue
+            code_points = clean_filtered_df[clean_filtered_df["Stillingskode"] == kode]
+            if code_points.empty:
+                continue
+            line_color = code_color_map[str(kode)]
+            x_range = np.linspace(code_points[x_col].min(), code_points[x_col].max(), 50)
+            y_range = r["intercept"] + r["slope"] * x_range
+
+            if show_band and r["std_residual"] and r["std_residual"] > 1e-9:
+                band = 1.96 * r["std_residual"]
+                fig.add_scatter(
+                    x=x_range, y=y_range + band, mode="lines", line=dict(width=0),
+                    showlegend=False, hoverinfo="skip",
+                )
+                fig.add_scatter(
+                    x=x_range, y=y_range - band, mode="lines", line=dict(width=0),
+                    fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.12),
+                    name=f"95% referanseintervall {kode}", showlegend=False, hoverinfo="skip",
+                )
+
+            fig.add_scatter(
+                x=x_range,
+                y=y_range,
+                mode="lines",
+                name=f"Trend {kode} (R²={r['r_squared']:.2f})",
+                line=dict(width=2, color=line_color),
+            )
+
+        fig.update_layout(height=750, xaxis_title=x_label, clickmode="event+select")
+        click_event = st.plotly_chart(
+            fig, use_container_width=True, on_select="rerun", selection_mode=("points",), key="main_scatter_chart"
+        )
+
+        clicked_name = None
+        if click_event and click_event.get("selection") and click_event["selection"].get("points"):
+            customdata = click_event["selection"]["points"][0].get("customdata")
+            if customdata:
+                clicked_name = customdata[0]
+
+        if clicked_name and clicked_name != currently_selected:
+            match = filtered_df[filtered_df["Fullt Navn"] == clicked_name]
+            if not match.empty:
+                st.session_state.pop("employee_selector", None)
+                st.session_state.pending_selected_employee_hash = match.iloc[0]["_hash"]
+                st.session_state.selected_employee = clicked_name
+                st.rerun()
+
     with col_stats:
-        st.subheader("📊 Statistisk Sammendrag")
+        st.markdown("### 📊 Statistisk Sammendrag")
 
         if clean_filtered_df.empty:
             st.info("Alle valgte ansatte er markert som outliers - ingen datagrunnlag for statistikk.")
@@ -250,7 +427,7 @@ try:
         employee_names = filtered_df.sort_values(by="Etternavn")["Fullt Navn"].tolist()
 
         st.markdown("---")
-        st.subheader("👤 Ansatt-oversikt")
+        st.markdown("#### 👤 Ansatt-oversikt")
 
         pending_hash = st.session_state.get("pending_selected_employee_hash")
         default_employee = None
@@ -262,7 +439,7 @@ try:
         employee_options = [None] + employee_names
         default_idx = employee_options.index(default_employee) if default_employee in employee_options else 0
 
-        st.session_state.selected_employee = st.selectbox(
+        new_selected_employee = st.selectbox(
             "Velg ansatt for detaljvisning:",
             options=employee_options,
             index=default_idx,
@@ -271,80 +448,15 @@ try:
         )
         st.session_state.pending_selected_employee_hash = None
 
-    with col_plot:
-        st.subheader("📈 Lønn vs. Ansiennitet med Regresjon per Stillingskode")
-
-        show_band = st.checkbox(
-            "Vis 95% referanseintervall rundt trendlinjene",
-            value=True,
-            help="Bånd på ±1,96 standardavvik (residualer) rundt hver trendlinje - viser normalspredningen for stillingskoden.",
-        )
-
-        plot_df = filtered_df.copy()
-        plot_df["Farge"] = plot_df["Stillingskode"].astype(str)
-        plot_df["Størrelse"] = plot_df["Is Outlier"].map({True: 8, False: 12})
-        plot_df["Symbol"] = plot_df["Is Outlier"].map({True: "circle-open", False: "circle"})
-
-        if st.session_state.selected_employee:
-            sel_mask = plot_df["Fullt Navn"] == st.session_state.selected_employee
-            plot_df.loc[sel_mask, "Farge"] = "🔴 VALGT ANSATT"
-            plot_df.loc[sel_mask, "Størrelse"] = 20
-
-        palette = px.colors.qualitative.Dark24
-        code_color_map = {str(kode): palette[i % len(palette)] for i, kode in enumerate(selected_codes)}
-
-        fig = px.scatter(
-            plot_df,
-            x="Ansiennitet (År)",
-            y="Årslønn",
-            color="Farge",
-            size="Størrelse",
-            symbol="Symbol",
-            symbol_map={"circle-open": "circle-open", "circle": "circle"},
-            hover_data=["Fullt Navn", "Stillingskode", "Is Outlier", "Lønnsavvik (Kr)"],
-            title="Årslønn mot Ansiennitet (åpen sirkel = markert outlier)",
-            color_discrete_map={"🔴 VALGT ANSATT": "red", **code_color_map},
-        )
-
-        for kode in selected_codes:
-            r = reg_results.get(kode)
-            if not r or r["slope"] is None:
-                continue
-            code_points = clean_filtered_df[clean_filtered_df["Stillingskode"] == kode]
-            if code_points.empty:
-                continue
-            line_color = code_color_map[str(kode)]
-            x_range = np.linspace(code_points["Ansiennitet (År)"].min(), code_points["Ansiennitet (År)"].max(), 50)
-            y_range = r["intercept"] + r["slope"] * x_range
-
-            if show_band and r["std_residual"] and r["std_residual"] > 1e-9:
-                band = 1.96 * r["std_residual"]
-                fig.add_scatter(
-                    x=x_range, y=y_range + band, mode="lines", line=dict(width=0),
-                    showlegend=False, hoverinfo="skip",
-                )
-                fig.add_scatter(
-                    x=x_range, y=y_range - band, mode="lines", line=dict(width=0),
-                    fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.12),
-                    name=f"95% referanseintervall {kode}", showlegend=False, hoverinfo="skip",
-                )
-
-            fig.add_scatter(
-                x=x_range,
-                y=y_range,
-                mode="lines",
-                name=f"Trend {kode} (R²={r['r_squared']:.2f})",
-                line=dict(width=2, color=line_color),
-            )
-
-        fig.update_layout(height=600)
-        st.plotly_chart(fig, use_container_width=True)
+        if new_selected_employee != st.session_state.get("selected_employee"):
+            st.session_state.selected_employee = new_selected_employee
+            st.rerun()
 
     # --- DETALJVISNING FOR ANSATT ---
 
     if st.session_state.selected_employee:
         st.markdown("---")
-        st.subheader(f"Detaljvisning: {st.session_state.selected_employee}")
+        st.markdown(f"#### Detaljvisning: {st.session_state.selected_employee}")
 
         col_settings, col_details = st.columns([1, 2])
 
@@ -354,7 +466,7 @@ try:
 
         with col_settings:
             st.markdown("**Velg kolonner for visning:**")
-            cols_to_exclude = ["Fullt Navn", "Ansiennitet (År)", "Forventet Lønn", "Lønnsavvik (Kr)", "_hash", "Is Outlier"]
+            cols_to_exclude = ["Fullt Navn", "Ansiennitet (År)", "Stillingsansiennitet (År)", "Forventet Lønn", "Lønnsavvik (Kr)", "_hash", "Is Outlier"]
             available_cols = [c for c in df.columns if c not in cols_to_exclude]
 
             st.session_state.display_columns = st.multiselect(
@@ -403,24 +515,77 @@ try:
                     z_suffix = f" (tilsvarer {abs(avvik) / std_residual:.1f} standardavvik)"
 
                 if pd.isna(avvik):
-                    st.info("For få datapunkter i denne stillingskoden til å beregne forventet lønn.")
+                    st.info("For få datapunkter, eller ingen verdi for valgt x-akse, til å beregne forventet lønn.")
                 elif avvik > 0:
-                    st.success(f"Ansatt ligger **{avvik:,.0f} kr** over trendlinjen for sin ansiennitet og stillingskode{z_suffix}.".replace(",", " "))
+                    st.success(f"Ansatt ligger **{avvik:,.0f} kr** over trendlinjen for sin {x_label.lower()} og stillingskode{z_suffix}.".replace(",", " "))
                 elif avvik < 0:
-                    st.error(f"Ansatt ligger **{abs(avvik):,.0f} kr** under trendlinjen for sin ansiennitet og stillingskode{z_suffix}.".replace(",", " "))
+                    st.error(f"Ansatt ligger **{abs(avvik):,.0f} kr** under trendlinjen for sin {x_label.lower()} og stillingskode{z_suffix}.".replace(",", " "))
                 else:
                     st.info("Ansatt ligger nøyaktig på trendlinjen.")
 
                 st.markdown("Dette avviket indikerer hvor langt personens lønn er fra det statistisk forventede lønnsnivået for stillingskoden (basert på OLS-regresjon, uten outliers).")
 
-    # --- ANONYMISERT PDF-EKSPORT ---
+    # --- PDF-INNSTILLINGER ---
 
     st.markdown("---")
-    st.subheader("📄 Eksporter anonymiserte PDF-rapporter")
+    st.markdown("### 📄 Eksporter anonymiserte PDF-rapporter")
+
+    with st.expander("⚙️ Innhold i PDF-rapportene"):
+        stats_options = [key for key, _ in KEY_LABELS]
+        stats_labels = dict(KEY_LABELS)
+        selected_stats = st.multiselect(
+            "Nøkkeltall som skal vises:",
+            options=stats_options,
+            default=[k for k in st.session_state.pdf_options.get("stats_fields", stats_options) if k in stats_options],
+            format_func=lambda k: stats_labels[k],
+            key="pdf_stats_fields",
+        )
+        show_axis_values = st.checkbox(
+            "Vis tallverdier på aksene i figuren",
+            value=st.session_state.pdf_options.get("show_axis_values", True),
+            key="pdf_show_axis_values",
+        )
+        show_avvik_text = st.checkbox(
+            "Vis avviksforklaring (kr og standardavvik fra trendlinjen)",
+            value=st.session_state.pdf_options.get("show_avvik_text", True),
+            key="pdf_show_avvik_text",
+        )
+        st.session_state.pdf_options = {
+            "stats_fields": selected_stats,
+            "show_axis_values": show_axis_values,
+            "show_avvik_text": show_avvik_text,
+        }
+
+    pdf_options = st.session_state.pdf_options
+
+    if union_values:
+        st.markdown("**Hurtigeksport per fagforening:**")
+        for uv in union_values:
+            members = sorted(df[df[union_col] == uv]["Fullt Navn"].tolist())
+            btn_col, dl_col = st.columns([2, 2])
+            with btn_col:
+                if st.button(f"📄 Generer for alle {uv}-medlemmer ({len(members)} stk)", key=f"union_export_btn_{uv}"):
+                    with st.spinner(f"Genererer PDF-rapporter for {uv}..."):
+                        zip_bytes = build_export_zip(
+                            members, df, st.session_state.outliers_by_code, "_hash", unit_col, x_col, x_label, pdf_options
+                        )
+                    st.session_state[f"_union_zip_{uv}"] = zip_bytes
+            with dl_col:
+                if st.session_state.get(f"_union_zip_{uv}"):
+                    st.download_button(
+                        f"⬇️ Last ned {uv}-rapporter",
+                        data=st.session_state[f"_union_zip_{uv}"],
+                        file_name=f"{settlement_name}_{uv}_eksport.zip",
+                        mime="application/zip",
+                        key=f"union_dl_{uv}",
+                    )
+        st.markdown("---")
+
     st.caption(
-        "Velg ansatte (f.eks. fagforeningsmedlemmer på tvers av stillingskoder). Hver PDF navngis etter og "
+        "Velg ansatte manuelt (f.eks. på tvers av stillingskoder). Hver PDF navngis etter og "
         "inneholder kun personopplysninger for den aktuelle ansatte. Analysen for hver ansatt baseres alltid "
-        "på deres egen stillingskode og ekskluderer outliers - uavhengig av hvem som er valgt for eksport."
+        "på deres egen stillingskode og ekskluderer outliers - uavhengig av hvem som er valgt for eksport. "
+        "Fagforeningstilhørighet sendes aldri med i PDF-en."
     )
 
     all_names_in_dataset = sorted(df["Fullt Navn"].tolist())
@@ -432,7 +597,9 @@ try:
 
     if st.button("Generer PDF-rapporter", disabled=not export_selection):
         with st.spinner("Genererer PDF-rapporter..."):
-            zip_bytes = build_export_zip(export_selection, df, st.session_state.outliers_by_code, "_hash", unit_col)
+            zip_bytes = build_export_zip(
+                export_selection, df, st.session_state.outliers_by_code, "_hash", unit_col, x_col, x_label, pdf_options
+            )
         st.session_state["_export_zip_bytes"] = zip_bytes
 
     if st.session_state.get("_export_zip_bytes"):
@@ -444,6 +611,8 @@ try:
         )
 
     # --- LAGRE OPPGJØR ---
+
+    st.session_state.data_loaded_ok = True
 
     selected_hash = None
     if st.session_state.selected_employee:
@@ -460,6 +629,8 @@ try:
             "last_selected_employee_hash": selected_hash,
             "selected_codes": list(selected_codes),
             "display_columns": st.session_state.display_columns,
+            "x_axis_choice": x_col,
+            "pdf_options": pdf_options,
         },
     )
 

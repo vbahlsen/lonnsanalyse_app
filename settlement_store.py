@@ -36,6 +36,13 @@ def list_settlements() -> list[str]:
     return names
 
 
+DEFAULT_PDF_OPTIONS = {
+    "stats_fields": ["min", "q1", "median", "mean", "q3", "max", "std"],
+    "show_axis_values": True,
+    "show_avvik_text": True,
+}
+
+
 def default_settlement(name: str) -> dict:
     return {
         "name": name,
@@ -45,6 +52,8 @@ def default_settlement(name: str) -> dict:
         "last_selected_employee_hash": None,
         "selected_codes": None,
         "display_columns": ["Fornavn", "Etternavn", "Stillingskode", "Tiltredelsesdato", "Årslønn"],
+        "x_axis_choice": "Ansiennitet (År)",
+        "pdf_options": dict(DEFAULT_PDF_OPTIONS),
         "updated_at": None,
     }
 
@@ -80,8 +89,24 @@ def employee_hash(fornavn: str, etternavn: str, stillingskode: str, tiltredelses
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
+def clean_path_string(raw: str | None) -> str:
+    """Renser en filsti limt inn av bruker.
+
+    Windows' "Kopier som bane" (Copy as path) pakker stien i doble
+    anførselstegn - det gjør at Path(...) aldri finner filen. Fjerner slike
+    omsluttende anførselstegn (rette eller krøllete) samt whitespace.
+    """
+    if not raw:
+        return ""
+    text = raw.strip()
+    if len(text) >= 2 and text[0] in "\"'“”" and text[-1] in "\"'“”":
+        text = text[1:-1].strip()
+    return text
+
+
 def resolve_data_file(file_path: str | None) -> Path | None:
-    if not file_path:
+    cleaned = clean_path_string(file_path)
+    if not cleaned:
         return None
-    path = Path(file_path)
+    path = Path(cleaned)
     return path if path.exists() and path.is_file() else None

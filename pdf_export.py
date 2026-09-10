@@ -1,5 +1,6 @@
 """Anonymisert PDF-eksport: én PDF per ansatt, navngitt etter dem, med kun
-deres egne personopplysninger. Andre ansattes navn vises aldri i en PDF."""
+deres egne personopplysninger. Andre ansattes navn vises aldri i en PDF, og
+eventuell fagforeningstilhørighet sendes aldri inn i disse funksjonene."""
 
 import io
 import re
@@ -17,6 +18,7 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from analysis import fit_linear_regression, summary_stats
+from settlement_store import DEFAULT_PDF_OPTIONS
 
 KEY_LABELS = [
     ("min", "Min"),
@@ -38,11 +40,13 @@ def _format_kr(value) -> str:
     return f"kr {value:,.0f}".replace(",", " ")
 
 
-def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | None) -> io.BytesIO:
+def _render_chart(
+    employee_row, code_clean_df, is_outlier: bool, fit: dict | None, x_col: str, x_label: str, show_axis_values: bool
+) -> io.BytesIO:
     fig, ax = plt.subplots(figsize=(14, 8))
 
     ax.scatter(
-        code_clean_df["Ansiennitet (År)"],
+        code_clean_df[x_col],
         code_clean_df["Årslønn"],
         color="#7a8a99",
         s=40,
@@ -51,7 +55,7 @@ def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | Non
     )
 
     if fit:
-        x_range = [code_clean_df["Ansiennitet (År)"].min(), code_clean_df["Ansiennitet (År)"].max()]
+        x_range = [code_clean_df[x_col].min(), code_clean_df[x_col].max()]
         y_range = [fit["intercept"] + fit["slope"] * x for x in x_range]
         ax.plot(x_range, y_range, color="black", linewidth=2, label=f"Trendlinje (R²={fit['r_squared']:.2f})")
 
@@ -62,7 +66,7 @@ def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | Non
             ax.fill_between(x_range, lower, upper, color="black", alpha=0.08, label="95% referanseintervall")
 
     ax.scatter(
-        [employee_row["Ansiennitet (År)"]],
+        [employee_row[x_col]],
         [employee_row["Årslønn"]],
         color="#d1495b",
         s=140,
@@ -72,7 +76,7 @@ def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | Non
     )
     ax.annotate(
         employee_row["Fullt Navn"],
-        (employee_row["Ansiennitet (År)"], employee_row["Årslønn"]),
+        (employee_row[x_col], employee_row["Årslønn"]),
         textcoords="offset points",
         xytext=(10, 10),
         fontsize=11,
@@ -82,8 +86,11 @@ def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | Non
     if is_outlier:
         ax.set_title("Ekskludert fra trendlinjeberegning (markert som outlier)", fontsize=11, color="#d1495b")
 
-    ax.set_xlabel("Ansiennitet (år)")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("Årslønn (kr)")
+    if not show_axis_values:
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
     ax.legend(loc="best", fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -95,7 +102,17 @@ def _render_chart(employee_row, code_clean_df, is_outlier: bool, fit: dict | Non
     return buf
 
 
-def build_employee_pdf(employee_row, code_clean_df, unit_col: str | None, is_outlier: bool) -> bytes:
+def build_employee_pdf(
+    employee_row,
+    code_clean_df,
+    unit_col: str | None,
+    is_outlier: bool,
+    x_col: str = "Ansiennitet (År)",
+    x_label: str = "Ansiennitet (år)",
+    pdf_options: dict | None = None,
+) -> bytes:
+    options = {**DEFAULT_PDF_OPTIONS, **(pdf_options or {})}
+
     styles = getSampleStyleSheet()
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
@@ -128,15 +145,15 @@ def build_employee_pdf(employee_row, code_clean_df, unit_col: str | None, is_out
     elements.append(personalia_table)
     elements.append(Spacer(1, 0.6 * cm))
 
-    fit = fit_linear_regression(code_clean_df["Ansiennitet (År)"], code_clean_df["Årslønn"])
+    fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
 
-    elements.append(Paragraph("Lønn vs. ansiennitet for stillingskoden", styles["Heading2"]))
-    chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit)
+    elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", styles["Heading2"]))
+    chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"])
     elements.append(Image(chart_buf, width=16 * cm, height=9.14 * cm))
     elements.append(Spacer(1, 0.4 * cm))
 
-    if fit and not is_outlier:
-        avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row["Ansiennitet (År)"])
+    if fit and not is_outlier and options["show_avvik_text"]:
+        avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row[x_col])
         retning = "over" if avvik > 0 else "under" if avvik < 0 else "på"
         z_text = ""
         if fit["std_residual"] and fit["std_residual"] > 1e-9:
@@ -145,30 +162,33 @@ def build_employee_pdf(employee_row, code_clean_df, unit_col: str | None, is_out
         elements.append(
             Paragraph(
                 f"Avvik fra trendlinje: {_format_kr(abs(avvik))} {retning} forventet lønnsnivå for "
-                f"ansiennitet og stillingskode{z_text}.",
+                f"{x_label.lower()} og stillingskode{z_text}.",
                 styles["Normal"],
             )
         )
         elements.append(Spacer(1, 0.4 * cm))
 
-    elements.append(Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", styles["Heading2"]))
-    stats = summary_stats(code_clean_df)
-    stats_rows = [["Nøkkeltall", "Verdi"]] + [
-        [label, _format_kr(stats[key])] for key, label in KEY_LABELS
-    ]
-    stats_rows.append(["Antall i grunnlaget (uten outliers)", str(stats["n"])])
-    stats_table = Table(stats_rows, colWidths=[8 * cm, 7 * cm])
-    stats_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f5")),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
+    stats_fields = [f for f in options["stats_fields"] if f in dict(KEY_LABELS)]
+    if stats_fields:
+        elements.append(Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", styles["Heading2"]))
+        stats = summary_stats(code_clean_df)
+        label_lookup = dict(KEY_LABELS)
+        stats_rows = [["Nøkkeltall", "Verdi"]] + [
+            [label_lookup[key], _format_kr(stats[key])] for key in stats_fields
+        ]
+        stats_rows.append(["Antall i grunnlaget (uten outliers)", str(stats["n"])])
+        stats_table = Table(stats_rows, colWidths=[8 * cm, 7 * cm])
+        stats_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f5")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
         )
-    )
-    elements.append(stats_table)
+        elements.append(stats_table)
 
     if is_outlier:
         elements.append(Spacer(1, 0.4 * cm))
@@ -185,7 +205,16 @@ def build_employee_pdf(employee_row, code_clean_df, unit_col: str | None, is_out
     return buf.getvalue()
 
 
-def build_export_zip(selected_employees: list[str], df, outliers_by_code: dict, hash_col: str, unit_col: str | None) -> bytes:
+def build_export_zip(
+    selected_employees: list[str],
+    df,
+    outliers_by_code: dict,
+    hash_col: str,
+    unit_col: str | None,
+    x_col: str = "Ansiennitet (År)",
+    x_label: str = "Ansiennitet (år)",
+    pdf_options: dict | None = None,
+) -> bytes:
     from analysis import non_outlier_rows
 
     zip_buf = io.BytesIO()
@@ -197,7 +226,9 @@ def build_export_zip(selected_employees: list[str], df, outliers_by_code: dict, 
             code_clean_df = non_outlier_rows(df, stillingskode, outliers_by_code, hash_col)
             is_outlier = employee_row[hash_col] in set(outliers_by_code.get(str(stillingskode), []))
 
-            pdf_bytes = build_employee_pdf(employee_row, code_clean_df, unit_col, is_outlier)
+            pdf_bytes = build_employee_pdf(
+                employee_row, code_clean_df, unit_col, is_outlier, x_col, x_label, pdf_options
+            )
 
             base_name = _sanitize_filename(full_name)
             count = used_names.get(base_name, 0)

@@ -9,6 +9,7 @@ from scipy.stats import linregress
 REQUIRED_COLUMNS = ["Etternavn", "Fornavn", "Stillingskode", "Tiltredelsesdato", "Årslønn"]
 OPTIONAL_UNIT_SYNONYMS = ["Ansattenhet", "Enhet", "Avdeling"]
 OPTIONAL_POSITION_SENIORITY_SYNONYMS = ["Stillingsansiennitet"]
+OPTIONAL_UNION_SYNONYMS = ["Fagforening"]
 
 
 def calculate_years_of_service(start_date):
@@ -97,12 +98,25 @@ def detect_position_seniority_column(df_columns: list[str]) -> str | None:
     return None
 
 
+def detect_union_column(df_columns: list[str]) -> str | None:
+    """Finner en 'Fagforening'-kolonne, hvis den finnes. Tom celle = ikke angitt."""
+    lower_lookup = {col.lower(): col for col in df_columns}
+    for synonym in OPTIONAL_UNION_SYNONYMS:
+        if synonym.lower() in lower_lookup:
+            return lower_lookup[synonym.lower()]
+    return None
+
+
 def fit_linear_regression(x: pd.Series, y: pd.Series) -> dict | None:
     """Kjører OLS-regresjon og returnerer slope/intercept/r_squared/std_residual/n.
 
-    Returnerer None hvis det er for få punkter eller ingen variasjon i x
-    (f.eks. alle har identisk ansiennitet) - da kan ingen trendlinje beregnes.
+    Rader hvor x eller y mangler ekskluderes automatisk. Returnerer None hvis
+    det er for få gjenværende punkter eller ingen variasjon i x (f.eks. alle
+    har identisk ansiennitet) - da kan ingen trendlinje beregnes.
     """
+    mask = x.notna() & y.notna()
+    x, y = x[mask], y[mask]
+
     if len(x) < 2 or x.nunique() < 2:
         return None
 
@@ -117,13 +131,19 @@ def fit_linear_regression(x: pd.Series, y: pd.Series) -> dict | None:
     }
 
 
-def run_regression_per_code(df: pd.DataFrame, outliers_by_code: dict[str, list[str]], hash_col: str = "_hash") -> dict:
-    """Kjører separat lineær regresjon (Årslønn vs. Ansiennitet) per stillingskode.
+def run_regression_per_code(
+    df: pd.DataFrame,
+    outliers_by_code: dict[str, list[str]],
+    x_col: str = "Ansiennitet (År)",
+    hash_col: str = "_hash",
+) -> dict:
+    """Kjører separat lineær regresjon (Årslønn vs. x_col) per stillingskode.
 
     Outliers (identifisert via hash_col mot outliers_by_code) ekskluderes fra
     regresjonen for sin stillingskode. Returnerer et dict per kode med
     slope/intercept/r_squared/std_residual/n, og skriver 'Forventet Lønn' /
-    'Lønnsavvik (Kr)' inn i df for radene som inngikk i en gyldig regresjon.
+    'Lønnsavvik (Kr)' inn i df for radene som inngikk i en gyldig regresjon
+    (NaN for rader uten gyldig verdi i x_col, f.eks. manglende Stillingsansiennitet).
     """
     results = {}
     df["Forventet Lønn"] = pd.NA
@@ -133,16 +153,16 @@ def run_regression_per_code(df: pd.DataFrame, outliers_by_code: dict[str, list[s
         outlier_hashes = set(outliers_by_code.get(str(kode), []))
         clean = group[~group[hash_col].isin(outlier_hashes)]
 
-        fit = fit_linear_regression(clean["Ansiennitet (År)"], clean["Årslønn"])
+        fit = fit_linear_regression(clean[x_col], clean["Årslønn"])
         if fit is None:
-            # For få datapunkter, eller alle har samme ansiennitet (f.eks. tilfeldig
-            # identisk tiltredelsesdato i en liten gruppe) - kan ikke regne trendlinje
-            # for denne stillingskoden, men resten av appen skal fortsatt fungere.
+            # For få datapunkter, eller alle har samme verdi på x-aksen (f.eks.
+            # tilfeldig identisk startdato i en liten gruppe) - kan ikke regne
+            # trendlinje for denne stillingskoden, men resten av appen fungerer.
             results[kode] = {"slope": None, "intercept": None, "r_squared": None, "std_residual": None, "n": len(clean)}
             continue
 
         results[kode] = fit
-        expected = fit["intercept"] + fit["slope"] * group["Ansiennitet (År)"]
+        expected = fit["intercept"] + fit["slope"] * group[x_col]
         df.loc[group.index, "Forventet Lønn"] = expected
         df.loc[group.index, "Lønnsavvik (Kr)"] = group["Årslønn"] - expected
 
