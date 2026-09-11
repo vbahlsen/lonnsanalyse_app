@@ -5,6 +5,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from scipy.stats import linregress
+from scipy.stats import t as t_dist
 
 REQUIRED_COLUMNS = ["Etternavn", "Fornavn", "Stillingskode", "Tiltredelsesdato", "Årslønn"]
 OPTIONAL_UNIT_SYNONYMS = ["Ansattenhet", "Enhet", "Avdeling"]
@@ -108,7 +109,9 @@ def detect_union_column(df_columns: list[str]) -> str | None:
 
 
 def fit_linear_regression(x: pd.Series, y: pd.Series) -> dict | None:
-    """Kjører OLS-regresjon og returnerer slope/intercept/r_squared/std_residual/n.
+    """Kjører OLS-regresjon og returnerer slope/intercept/r_squared/std_residual/n,
+    samt grunnlaget (residual_se/x_mean/sxx/dof) for å beregne et korrekt,
+    innsnevrende 95%-konfidensintervall langs trendlinjen via confidence_band().
 
     Rader hvor x eller y mangler ekskluderes automatisk. Returnerer None hvis
     det er for få gjenværende punkter eller ingen variasjon i x (f.eks. alle
@@ -122,13 +125,46 @@ def fit_linear_regression(x: pd.Series, y: pd.Series) -> dict | None:
 
     slope, intercept, r_value, _, _ = linregress(x, y)
     residuals = y - (intercept + slope * x)
+    n = len(x)
+    dof = n - 2
+    residual_se = np.sqrt((residuals**2).sum() / dof) if dof > 0 else None
+    x_mean = x.mean()
+    sxx = ((x - x_mean) ** 2).sum()
     return {
         "slope": slope,
         "intercept": intercept,
         "r_squared": r_value**2,
         "std_residual": residuals.std(),
-        "n": len(x),
+        "residual_se": residual_se,
+        "x_mean": x_mean,
+        "sxx": sxx,
+        "dof": dof,
+        "n": n,
     }
+
+
+def confidence_band(fit: dict | None, x_values, confidence: float = 0.95):
+    """Beregner et 95%-konfidensintervall for FORVENTET (gjennomsnittlig) lønn
+    langs trendlinjen ved de gitte x-verdiene.
+
+    I motsetning til et enkelt bånd med konstant bredde (±1,96×std.avvik) tar
+    dette hensyn til at usikkerheten i en OLS-regresjon er lavest nær
+    gjennomsnittlig ansiennitet i datagrunnlaget og øker jo lenger unna man
+    kommer - båndet snevrer seg dermed inn på midten og videre ut mot
+    ytterpunktene, slik en statistisk korrekt fremstilling skal se ut.
+
+    Returnerer (lower, upper) som numpy-arrays, eller (None, None) hvis det
+    ikke er nok datagrunnlag (færre enn 3 punkter) til å beregne et intervall.
+    """
+    if not fit or not fit.get("residual_se") or not fit.get("dof") or fit["dof"] <= 0 or fit.get("sxx", 0) <= 0:
+        return None, None
+
+    t_crit = t_dist.ppf(1 - (1 - confidence) / 2, fit["dof"])
+    x_arr = np.asarray(x_values, dtype=float)
+    se = fit["residual_se"] * np.sqrt(1.0 / fit["n"] + (x_arr - fit["x_mean"]) ** 2 / fit["sxx"])
+    y_center = fit["intercept"] + fit["slope"] * x_arr
+    half_width = t_crit * se
+    return y_center - half_width, y_center + half_width
 
 
 def run_regression_per_code(
@@ -158,7 +194,10 @@ def run_regression_per_code(
             # For få datapunkter, eller alle har samme verdi på x-aksen (f.eks.
             # tilfeldig identisk startdato i en liten gruppe) - kan ikke regne
             # trendlinje for denne stillingskoden, men resten av appen fungerer.
-            results[kode] = {"slope": None, "intercept": None, "r_squared": None, "std_residual": None, "n": len(clean)}
+            results[kode] = {
+                "slope": None, "intercept": None, "r_squared": None, "std_residual": None,
+                "residual_se": None, "x_mean": None, "sxx": None, "dof": None, "n": len(clean),
+            }
             continue
 
         results[kode] = fit

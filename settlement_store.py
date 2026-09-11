@@ -41,6 +41,8 @@ DEFAULT_PDF_OPTIONS = {
     "show_axis_values": True,
     "show_avvik_text": True,
     "pdf_x_axis_mode": "tiltredelse",
+    "hide_other_points": False,
+    "show_mean_line": False,
 }
 
 

@@ -7,6 +7,7 @@ import re
 import zipfile
 
 import matplotlib
+import numpy as np
 import pandas as pd
 
 matplotlib.use("Agg")
@@ -17,7 +18,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from analysis import fit_linear_regression, summary_stats
+from analysis import confidence_band, fit_linear_regression, summary_stats
 from settlement_store import DEFAULT_PDF_OPTIONS
 
 KEY_LABELS = [
@@ -41,29 +42,40 @@ def _format_kr(value) -> str:
 
 
 def _render_chart(
-    employee_row, code_clean_df, is_outlier: bool, fit: dict | None, x_col: str, x_label: str, show_axis_values: bool
+    employee_row,
+    code_clean_df,
+    is_outlier: bool,
+    fit: dict | None,
+    x_col: str,
+    x_label: str,
+    show_axis_values: bool,
+    hide_other_points: bool = False,
+    show_mean_line: bool = False,
 ) -> io.BytesIO:
     fig, ax = plt.subplots(figsize=(13, 7))
 
-    ax.scatter(
-        code_clean_df[x_col],
-        code_clean_df["Årslønn"],
-        color="#7a8a99",
-        s=40,
-        label="Kollegaer i samme stillingskode",
-        zorder=2,
-    )
+    if not hide_other_points:
+        ax.scatter(
+            code_clean_df[x_col],
+            code_clean_df["Årslønn"],
+            color="#7a8a99",
+            s=40,
+            label="Kollegaer i samme stillingskode",
+            zorder=2,
+        )
 
     if fit:
-        x_range = [code_clean_df[x_col].min(), code_clean_df[x_col].max()]
-        y_range = [fit["intercept"] + fit["slope"] * x for x in x_range]
+        x_range = np.linspace(code_clean_df[x_col].min(), code_clean_df[x_col].max(), 50)
+        y_range = fit["intercept"] + fit["slope"] * x_range
         ax.plot(x_range, y_range, color="black", linewidth=2, label=f"Trendlinje (R²={fit['r_squared']:.2f})")
 
-        std = fit["std_residual"]
-        if std and std > 1e-9:
-            upper = [y + 1.96 * std for y in y_range]
-            lower = [y - 1.96 * std for y in y_range]
-            ax.fill_between(x_range, lower, upper, color="black", alpha=0.08, label="95% referanseintervall")
+        ci_lower, ci_upper = confidence_band(fit, x_range)
+        if ci_lower is not None:
+            ax.fill_between(x_range, ci_lower, ci_upper, color="black", alpha=0.08, label="95% konfidensintervall")
+
+    if show_mean_line:
+        mean_salary = code_clean_df["Årslønn"].mean()
+        ax.axhline(mean_salary, color="#2a9d8f", linewidth=1.5, label="Snitt i stillingskoden")
 
     ax.scatter(
         [employee_row[x_col]],
@@ -180,7 +192,10 @@ def build_employee_pdf(
         fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
 
         elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", heading_style))
-        chart_buf = _render_chart(employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"])
+        chart_buf = _render_chart(
+            employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"],
+            options.get("hide_other_points", False), options.get("show_mean_line", False),
+        )
         if options["show_avvik_text"]:
             img_width, img_height = 13 * cm, 7 * cm
         else:

@@ -83,7 +83,7 @@ if current_name != picked:
     stale_keys = (
         "file_path_widget", "employee_selector", "column_selector", "export_selection",
         "stillingskode_filter", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
-        "pdf_x_axis_mode_radio", "pdf_report_date",
+        "pdf_x_axis_mode_radio", "pdf_report_date", "pdf_hide_other_points", "pdf_show_mean_line",
     )
     for key in list(st.session_state.keys()):
         if key in stale_keys or key.startswith(stale_prefixes) or key.startswith("_union_zip_"):
@@ -345,16 +345,16 @@ try:
             x_range = np.linspace(code_points[x_col].min(), code_points[x_col].max(), 50)
             y_range = r["intercept"] + r["slope"] * x_range
 
-            if r["std_residual"] and r["std_residual"] > 1e-9:
-                band = 1.96 * r["std_residual"]
+            ci_lower, ci_upper = analysis.confidence_band(r, x_range)
+            if ci_lower is not None:
                 fig.add_scatter(
-                    x=x_range, y=y_range + band, mode="lines", line=dict(width=0),
+                    x=x_range, y=ci_upper, mode="lines", line=dict(width=0),
                     showlegend=False, hoverinfo="skip",
                 )
                 fig.add_scatter(
-                    x=x_range, y=y_range - band, mode="lines", line=dict(width=0),
+                    x=x_range, y=ci_lower, mode="lines", line=dict(width=0),
                     fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.12),
-                    name=f"95% referanseintervall {kode}", showlegend=False, hoverinfo="skip",
+                    name=f"95% konfidensintervall {kode}", showlegend=False, hoverinfo="skip",
                 )
 
             fig.add_scatter(
@@ -405,7 +405,12 @@ try:
             st.dataframe(pd.DataFrame(stats_rows), hide_index=True, use_container_width=True, height=210)
 
         with st.popover("📈 Regresjon per stillingskode", use_container_width=True):
-            st.caption("Outliers ekskludert. Std.avvik = spredningen (residualene) rundt trendlinjen - brukes til 95%-referanseintervallet i grafen.")
+            st.caption(
+                "Outliers ekskludert. Std.avvik = spredningen (residualene) rundt trendlinjen. Det skraverte "
+                "området i grafen er et 95% konfidensintervall for forventet lønn - det snevres inn mot "
+                "gjennomsnittlig ansiennitet i datagrunnlaget (der presisjonen er størst) og videre ut mot "
+                "ytterpunktene."
+            )
             reg_table = []
             for kode in selected_codes:
                 r = reg_results.get(kode)
@@ -585,12 +590,27 @@ try:
                 key="pdf_x_axis_mode_radio",
             )
 
+        hide_other_points = st.checkbox(
+            "Vis kun den ansatte selv i figuren (skjul kollegapunkter)",
+            value=st.session_state.pdf_options.get("hide_other_points", False),
+            help="Trendlinje, konfidensintervall og eventuell snittlinje beregnes fortsatt på hele "
+            "stillingskoden, men enkeltpunktene til kollegaer vises ikke i figuren.",
+            key="pdf_hide_other_points",
+        )
+        show_mean_line = st.checkbox(
+            "Vis linje for gjennomsnittlig lønn i stillingskoden",
+            value=st.session_state.pdf_options.get("show_mean_line", False),
+            key="pdf_show_mean_line",
+        )
+
         st.session_state.pdf_options = {
             "stats_fields": selected_stats,
             "show_axis_values": show_axis_values,
             "show_avvik_text": show_avvik_text,
             "pdf_x_axis_mode": pdf_x_axis_mode,
             "report_date": report_date_value.isoformat(),
+            "hide_other_points": hide_other_points,
+            "show_mean_line": show_mean_line,
         }
 
     pdf_options = st.session_state.pdf_options
