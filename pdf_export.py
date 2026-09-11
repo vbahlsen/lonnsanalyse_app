@@ -12,6 +12,7 @@ import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -41,6 +42,34 @@ def _format_kr(value) -> str:
     return f"kr {value:,.0f}".replace(",", " ")
 
 
+def _render_density_cloud(ax, x_data, y_data) -> bool:
+    """Tegner kollegaene som en diffus tetthetssky (2D kernel density estimate) i
+    stedet for diskrete punkter - viser hvor lønningene i stillingskoden klumper
+    seg uten at noen enkeltperson kan identifiseres fra figuren.
+
+    Returnerer False (og tegner ingenting) hvis det er for få eller for
+    ensartede datapunkter til at en tetthetsestimering gir mening.
+    """
+    x = np.asarray(x_data, dtype=float)
+    y = np.asarray(y_data, dtype=float)
+    if len(x) < 5 or np.ptp(x) <= 0 or np.ptp(y) <= 0:
+        return False
+
+    x_pad = np.ptp(x) * 0.12
+    y_pad = np.ptp(y) * 0.12
+    xx, yy = np.mgrid[x.min() - x_pad : x.max() + x_pad : 120j, y.min() - y_pad : y.max() + y_pad : 120j]
+    positions = np.vstack([xx.ravel(), yy.ravel()])
+    try:
+        kernel = gaussian_kde(np.vstack([x, y]))
+    except (np.linalg.LinAlgError, ValueError):
+        return False
+    density = np.reshape(kernel(positions).T, xx.shape)
+    # NB: ingen "label=" her - QuadMesh støttes ikke av ax.legend() og gir en
+    # advarsel. Legend-oppføringen lages i stedet av en usynlig proxy i _render_chart.
+    ax.pcolormesh(xx, yy, density, cmap="Blues", alpha=0.6, shading="gouraud", zorder=1)
+    return True
+
+
 def _render_chart(
     employee_row,
     code_clean_df,
@@ -49,12 +78,12 @@ def _render_chart(
     x_col: str,
     x_label: str,
     show_axis_values: bool,
-    hide_other_points: bool = False,
+    colleague_display: str = "points",
     show_mean_line: bool = False,
 ) -> io.BytesIO:
     fig, ax = plt.subplots(figsize=(13, 7))
 
-    if not hide_other_points:
+    if colleague_display == "points":
         ax.scatter(
             code_clean_df[x_col],
             code_clean_df["Årslønn"],
@@ -63,6 +92,21 @@ def _render_chart(
             label="Kollegaer i samme stillingskode",
             zorder=2,
         )
+    elif colleague_display == "heatmap":
+        drawn = _render_density_cloud(ax, code_clean_df[x_col], code_clean_df["Årslønn"])
+        if drawn:
+            # pcolormesh sin "label" brukes ikke automatisk av legend() - lag en
+            # usynlig patch kun for å få en fin legendoppføring for tetthetsskyen.
+            ax.scatter([], [], marker="s", s=100, color="#6fa8d8", alpha=0.6, label="Kollegaer (tetthetssky)")
+        # Sett aksegrenser eksplisitt slik at figuren ikke blir vesentlig bredere
+        # enn ved vanlig punktvisning, selv med polstringen tetthetsskyen bruker.
+        x_vals = code_clean_df[x_col]
+        y_vals = code_clean_df["Årslønn"]
+        x_margin = (x_vals.max() - x_vals.min()) * 0.08 or 1
+        y_margin = (y_vals.max() - y_vals.min()) * 0.08 or 1
+        ax.set_xlim(x_vals.min() - x_margin, x_vals.max() + x_margin)
+        ax.set_ylim(y_vals.min() - y_margin, y_vals.max() + y_margin)
+    # colleague_display == "hidden" -> ikke tegn kollegaene i det hele tatt
 
     if fit:
         x_range = np.linspace(code_clean_df[x_col].min(), code_clean_df[x_col].max(), 50)
@@ -194,7 +238,7 @@ def build_employee_pdf(
         elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", heading_style))
         chart_buf = _render_chart(
             employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"],
-            options.get("hide_other_points", False), options.get("show_mean_line", False),
+            options.get("colleague_display", "points"), options.get("show_mean_line", False),
         )
         if options["show_avvik_text"]:
             img_width, img_height = 13 * cm, 7 * cm

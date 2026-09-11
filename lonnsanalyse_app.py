@@ -83,7 +83,7 @@ if current_name != picked:
     stale_keys = (
         "file_path_widget", "employee_selector", "column_selector", "export_selection",
         "stillingskode_filter", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
-        "pdf_x_axis_mode_radio", "pdf_report_date", "pdf_hide_other_points", "pdf_show_mean_line",
+        "pdf_x_axis_mode_radio", "pdf_report_date", "pdf_colleague_display", "pdf_show_mean_line",
     )
     for key in list(st.session_state.keys()):
         if key in stale_keys or key.startswith(stale_prefixes) or key.startswith("_union_zip_"):
@@ -590,12 +590,22 @@ try:
                 key="pdf_x_axis_mode_radio",
             )
 
-        hide_other_points = st.checkbox(
-            "Vis kun den ansatte selv i figuren (skjul kollegapunkter)",
-            value=st.session_state.pdf_options.get("hide_other_points", False),
+        colleague_display_options = ["points", "heatmap", "hidden"]
+        colleague_display_labels = {
+            "points": "Enkeltpunkter (som i dag)",
+            "heatmap": "Diffus tetthetssky (heatmap)",
+            "hidden": "Skjul helt (vis kun deg selv)",
+        }
+        saved_colleague_display = st.session_state.pdf_options.get("colleague_display", "points")
+        colleague_display = st.radio(
+            "Kollegaer i figuren:",
+            options=colleague_display_options,
+            index=colleague_display_options.index(saved_colleague_display) if saved_colleague_display in colleague_display_options else 0,
+            format_func=lambda v: colleague_display_labels[v],
             help="Trendlinje, konfidensintervall og eventuell snittlinje beregnes fortsatt på hele "
-            "stillingskoden, men enkeltpunktene til kollegaer vises ikke i figuren.",
-            key="pdf_hide_other_points",
+            "stillingskoden uansett valg - dette styrer kun hvordan kollegaenes lønnsdata vises i figuren.",
+            horizontal=True,
+            key="pdf_colleague_display",
         )
         show_mean_line = st.checkbox(
             "Vis linje for gjennomsnittlig lønn i stillingskoden",
@@ -609,7 +619,7 @@ try:
             "show_avvik_text": show_avvik_text,
             "pdf_x_axis_mode": pdf_x_axis_mode,
             "report_date": report_date_value.isoformat(),
-            "hide_other_points": hide_other_points,
+            "colleague_display": colleague_display,
             "show_mean_line": show_mean_line,
         }
 
