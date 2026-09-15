@@ -40,9 +40,19 @@ DEFAULT_PDF_OPTIONS = {
     "stats_fields": ["min", "q1", "median", "mean", "q3", "max", "std"],
     "show_axis_values": True,
     "show_avvik_text": True,
-    "pdf_x_axis_mode": "tiltredelse",
     "colleague_display": "points",
     "show_mean_line": False,
+    "pdf_fig_tiltredelse_with": True,
+    "pdf_fig_tiltredelse_without": False,
+    "pdf_fig_stilling_with": False,
+    "pdf_fig_stilling_without": False,
+}
+
+DEFAULT_NEW_HIRE_SETTINGS = {
+    "cutoff_date": None,
+    "show_regression_with_new_hires": True,
+    "show_regression_without_new_hires": False,
+    "hide_new_hires_live": False,
 }
 
 
@@ -57,6 +67,7 @@ def default_settlement(name: str) -> dict:
         "display_columns": ["Fornavn", "Etternavn", "Stillingskode", "Tiltredelsesdato", "Årslønn"],
         "x_axis_choice": "Ansiennitet (År)",
         "pdf_options": dict(DEFAULT_PDF_OPTIONS),
+        "new_hire_settings": dict(DEFAULT_NEW_HIRE_SETTINGS),
         "updated_at": None,
     }
 

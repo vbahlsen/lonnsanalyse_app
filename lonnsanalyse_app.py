@@ -84,6 +84,9 @@ if current_name != picked:
         "file_path_widget", "employee_selector", "column_selector", "export_selection",
         "stillingskode_filter", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
         "pdf_x_axis_mode_radio", "pdf_report_date", "pdf_colleague_display", "pdf_show_mean_line",
+        "new_hire_cutoff_widget", "show_regression_with_new_hires", "show_regression_without_new_hires",
+        "hide_new_hires_live", "pdf_fig_tiltredelse_with", "pdf_fig_tiltredelse_without",
+        "pdf_fig_stilling_with", "pdf_fig_stilling_without",
     )
     for key in list(st.session_state.keys()):
         if key in stale_keys or key.startswith(stale_prefixes) or key.startswith("_union_zip_"):
@@ -97,6 +100,13 @@ if current_name != picked:
     st.session_state.display_columns = settlement.get("display_columns") or analysis.REQUIRED_COLUMNS
     st.session_state.x_axis_choice = settlement.get("x_axis_choice") or "Ansiennitet (År)"
     st.session_state.pdf_options = settlement.get("pdf_options") or dict(store.DEFAULT_PDF_OPTIONS)
+    new_hire_settings = {**store.DEFAULT_NEW_HIRE_SETTINGS, **(settlement.get("new_hire_settings") or {})}
+    st.session_state["new_hire_cutoff_widget"] = (
+        date.fromisoformat(new_hire_settings["cutoff_date"]) if new_hire_settings.get("cutoff_date") else date.today()
+    )
+    st.session_state["show_regression_with_new_hires"] = new_hire_settings["show_regression_with_new_hires"]
+    st.session_state["show_regression_without_new_hires"] = new_hire_settings["show_regression_without_new_hires"]
+    st.session_state["hide_new_hires_live"] = new_hire_settings["hide_new_hires_live"]
     st.session_state.pending_selected_employee_hash = settlement.get("last_selected_employee_hash")
     st.session_state.pending_selected_codes = settlement.get("selected_codes")
     st.session_state.selected_employee = None
@@ -114,6 +124,10 @@ st.session_state.setdefault("display_columns", analysis.REQUIRED_COLUMNS)
 st.session_state.setdefault("x_axis_choice", "Ansiennitet (År)")
 st.session_state.setdefault("pdf_options", dict(store.DEFAULT_PDF_OPTIONS))
 st.session_state.setdefault("selected_employee", None)
+st.session_state.setdefault("new_hire_cutoff_widget", date.today())
+st.session_state.setdefault("show_regression_with_new_hires", True)
+st.session_state.setdefault("show_regression_without_new_hires", False)
+st.session_state.setdefault("hide_new_hires_live", False)
 
 # --- DATAFIL ---
 
@@ -254,9 +268,40 @@ try:
             x_label = "Ansiennitet (år) siden tiltredelse" if x_col == "Ansiennitet (År)" else "Stillingsansiennitet (år)"
             st.session_state.x_axis_choice = x_col
 
+        st.markdown("---")
+        st.caption(
+            "🆕 Nyansatte (høy turnover i enkelte koder kan gi en frontlasting som skjevfordeler trenden):"
+        )
+        cutoff_date_value = st.date_input(
+            "Nyansatt-grense (tiltrådt på/etter denne datoen regnes som nyansatt):",
+            format="DD/MM/YYYY",
+            key="new_hire_cutoff_widget",
+        )
+        reg_col_a, reg_col_b = st.columns(2)
+        with reg_col_a:
+            show_regression_with_new_hires = st.checkbox(
+                "Regresjon med nyansatte", key="show_regression_with_new_hires"
+            )
+        with reg_col_b:
+            show_regression_without_new_hires = st.checkbox(
+                "Regresjon uten nyansatte", key="show_regression_without_new_hires"
+            )
+        hide_new_hires_live = st.checkbox(
+            "Skjul nyansatte i visningen",
+            key="hide_new_hires_live",
+            help="Fjerner kun nyansatte fra selve grafen - de inngår fortsatt i statistikk og "
+            "regresjon i henhold til avkrysningene over.",
+        )
+
+    df["Er Nyansatt"] = df["Tiltredelsesdato"].apply(lambda d: analysis.is_new_hire(d, cutoff_date_value))
+
     # --- REGRESJON PER STILLINGSKODE (alltid på hele datasettet) ---
 
     reg_results = analysis.run_regression_per_code(df, st.session_state.outliers_by_code, x_col=x_col, hash_col="_hash")
+    reg_results_excl_new = analysis.run_regression_per_code(
+        df, st.session_state.outliers_by_code, x_col=x_col, hash_col="_hash",
+        new_hire_mask=df["Er Nyansatt"], exclude_new_hires=True, write_columns=False,
+    )
 
     filtered_df = df[df["Stillingskode"].isin(selected_codes)].copy()
 
@@ -286,6 +331,8 @@ try:
                     )
 
         plot_df = filtered_df.copy()
+        if hide_new_hires_live:
+            plot_df = plot_df[~plot_df["Er Nyansatt"]]
         plot_df["Farge"] = plot_df["Stillingskode"].astype(str)
         plot_df["Størrelse"] = plot_df["Is Outlier"].map({True: 5, False: 7})
         plot_df["Symbol"] = plot_df["Is Outlier"].map({True: "circle-open", False: "circle"})
@@ -334,36 +381,80 @@ try:
                 hoverinfo="skip",
             )
 
-        for kode in selected_codes:
-            r = reg_results.get(kode)
-            if not r or r["slope"] is None:
-                continue
-            code_points = clean_filtered_df[clean_filtered_df["Stillingskode"] == kode]
-            if code_points.empty:
-                continue
-            line_color = code_color_map[str(kode)]
-            x_range = np.linspace(code_points[x_col].min(), code_points[x_col].max(), 50)
-            y_range = r["intercept"] + r["slope"] * x_range
-
-            ci_lower, ci_upper = analysis.confidence_band(r, x_range)
-            if ci_lower is not None:
-                fig.add_scatter(
-                    x=x_range, y=ci_upper, mode="lines", line=dict(width=0),
-                    showlegend=False, hoverinfo="skip",
-                )
-                fig.add_scatter(
-                    x=x_range, y=ci_lower, mode="lines", line=dict(width=0),
-                    fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.12),
-                    name=f"95% konfidensintervall {kode}", showlegend=False, hoverinfo="skip",
-                )
-
+        new_hire_mask_plot = plot_df["Er Nyansatt"]
+        if new_hire_mask_plot.any():
+            # Ring rundt punktet i stedet for stripete fylling (Plotly støtter ikke
+            # stripete/hatch-mønster på scatter-markører, kun på stolpediagram) - samme
+            # teknikk som brukes i PDF-eksporten, slik at nyansatte er tydelig merket
+            # uten at de forsvinner inn i fargen til sin stillingskode.
             fig.add_scatter(
-                x=x_range,
-                y=y_range,
-                mode="lines",
-                name=f"Trend {kode} (R²={r['r_squared']:.2f})",
-                line=dict(width=2, color=line_color),
+                x=plot_df.loc[new_hire_mask_plot, x_col],
+                y=plot_df.loc[new_hire_mask_plot, "Årslønn"],
+                mode="markers",
+                marker=dict(size=16, color="rgba(0,0,0,0)", line=dict(width=2.5, color="#e07b00")),
+                name=f"🟠 Nyansatt (fra {cutoff_date_value.strftime('%d.%m.%Y')})",
+                showlegend=True,
+                hoverinfo="skip",
             )
+
+        for kode in selected_codes:
+            line_color = code_color_map[str(kode)]
+
+            if show_regression_with_new_hires:
+                r = reg_results.get(kode)
+                code_points = clean_filtered_df[clean_filtered_df["Stillingskode"] == kode]
+                if r and r["slope"] is not None and not code_points.empty:
+                    x_range = np.linspace(code_points[x_col].min(), code_points[x_col].max(), 50)
+                    y_range = r["intercept"] + r["slope"] * x_range
+
+                    ci_lower, ci_upper = analysis.confidence_band(r, x_range)
+                    if ci_lower is not None:
+                        fig.add_scatter(
+                            x=x_range, y=ci_upper, mode="lines", line=dict(width=0),
+                            showlegend=False, hoverinfo="skip",
+                        )
+                        fig.add_scatter(
+                            x=x_range, y=ci_lower, mode="lines", line=dict(width=0),
+                            fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.12),
+                            name=f"95% konfidensintervall {kode}", showlegend=False, hoverinfo="skip",
+                        )
+
+                    fig.add_scatter(
+                        x=x_range,
+                        y=y_range,
+                        mode="lines",
+                        name=f"Trend {kode} (R²={r['r_squared']:.2f})",
+                        line=dict(width=2, color=line_color),
+                    )
+
+            if show_regression_without_new_hires:
+                r2 = reg_results_excl_new.get(kode)
+                code_points_excl = clean_filtered_df[
+                    (clean_filtered_df["Stillingskode"] == kode) & (~clean_filtered_df["Er Nyansatt"])
+                ]
+                if r2 and r2["slope"] is not None and not code_points_excl.empty:
+                    x_range2 = np.linspace(code_points_excl[x_col].min(), code_points_excl[x_col].max(), 50)
+                    y_range2 = r2["intercept"] + r2["slope"] * x_range2
+
+                    ci_lower2, ci_upper2 = analysis.confidence_band(r2, x_range2)
+                    if ci_lower2 is not None:
+                        fig.add_scatter(
+                            x=x_range2, y=ci_upper2, mode="lines", line=dict(width=0),
+                            showlegend=False, hoverinfo="skip",
+                        )
+                        fig.add_scatter(
+                            x=x_range2, y=ci_lower2, mode="lines", line=dict(width=0),
+                            fill="tonexty", fillcolor=_hex_to_rgba(line_color, 0.08),
+                            name=f"95% konfidensintervall {kode} (uten nyansatte)", showlegend=False, hoverinfo="skip",
+                        )
+
+                    fig.add_scatter(
+                        x=x_range2,
+                        y=y_range2,
+                        mode="lines",
+                        name=f"Trend {kode} uten nyansatte (R²={r2['r_squared']:.2f})",
+                        line=dict(width=2, color=line_color, dash="dash"),
+                    )
 
         fig.update_layout(height=750, xaxis_title=x_label, clickmode="event+select")
         click_event = st.plotly_chart(
@@ -474,7 +565,7 @@ try:
 
         with col_settings:
             st.markdown("**Velg kolonner for visning:**")
-            cols_to_exclude = ["Fullt Navn", "Ansiennitet (År)", "Stillingsansiennitet (År)", "Forventet Lønn", "Lønnsavvik (Kr)", "_hash", "Is Outlier"]
+            cols_to_exclude = ["Fullt Navn", "Ansiennitet (År)", "Stillingsansiennitet (År)", "Forventet Lønn", "Lønnsavvik (Kr)", "_hash", "Is Outlier", "Er Nyansatt"]
             available_cols = [c for c in df.columns if c not in cols_to_exclude]
 
             st.session_state.display_columns = st.multiselect(
@@ -572,23 +663,46 @@ try:
         )
         report_date_str = report_date_value.strftime("%d/%m-%Y")
 
-        pdf_x_axis_mode = "tiltredelse"
+        st.markdown("**Figurer i PDF (kryss av for de du vil ha med - hver gir én egen figur):**")
         if position_seniority_col:
-            mode_options = ["tiltredelse", "stillingsansiennitet", "begge"]
-            mode_labels = {
-                "tiltredelse": "Ansiennitet siden tiltredelse",
-                "stillingsansiennitet": "Stillingsansiennitet",
-                "begge": "Begge (stablet i samme PDF)",
-            }
-            saved_mode = st.session_state.pdf_options.get("pdf_x_axis_mode", "tiltredelse")
-            pdf_x_axis_mode = st.radio(
-                "Regresjonsfigur(er) i PDF:",
-                options=mode_options,
-                index=mode_options.index(saved_mode) if saved_mode in mode_options else 0,
-                format_func=lambda m: mode_labels[m],
-                horizontal=True,
-                key="pdf_x_axis_mode_radio",
+            fig_col1, fig_col2 = st.columns(2)
+            with fig_col1:
+                st.caption("Ansiennitet siden tiltredelse")
+                pdf_fig_tiltredelse_with = st.checkbox(
+                    "Med nyansatte",
+                    value=st.session_state.pdf_options.get("pdf_fig_tiltredelse_with", True),
+                    key="pdf_fig_tiltredelse_with",
+                )
+                pdf_fig_tiltredelse_without = st.checkbox(
+                    "Uten nyansatte",
+                    value=st.session_state.pdf_options.get("pdf_fig_tiltredelse_without", False),
+                    key="pdf_fig_tiltredelse_without",
+                )
+            with fig_col2:
+                st.caption("Stillingsansiennitet")
+                pdf_fig_stilling_with = st.checkbox(
+                    "Med nyansatte",
+                    value=st.session_state.pdf_options.get("pdf_fig_stilling_with", False),
+                    key="pdf_fig_stilling_with",
+                )
+                pdf_fig_stilling_without = st.checkbox(
+                    "Uten nyansatte",
+                    value=st.session_state.pdf_options.get("pdf_fig_stilling_without", False),
+                    key="pdf_fig_stilling_without",
+                )
+        else:
+            pdf_fig_tiltredelse_with = st.checkbox(
+                "Med nyansatte",
+                value=st.session_state.pdf_options.get("pdf_fig_tiltredelse_with", True),
+                key="pdf_fig_tiltredelse_with",
             )
+            pdf_fig_tiltredelse_without = st.checkbox(
+                "Uten nyansatte",
+                value=st.session_state.pdf_options.get("pdf_fig_tiltredelse_without", False),
+                key="pdf_fig_tiltredelse_without",
+            )
+            pdf_fig_stilling_with = False
+            pdf_fig_stilling_without = False
 
         colleague_display_options = ["points", "heatmap", "hidden"]
         colleague_display_labels = {
@@ -617,24 +731,33 @@ try:
             "stats_fields": selected_stats,
             "show_axis_values": show_axis_values,
             "show_avvik_text": show_avvik_text,
-            "pdf_x_axis_mode": pdf_x_axis_mode,
             "report_date": report_date_value.isoformat(),
             "colleague_display": colleague_display,
             "show_mean_line": show_mean_line,
+            "pdf_fig_tiltredelse_with": pdf_fig_tiltredelse_with,
+            "pdf_fig_tiltredelse_without": pdf_fig_tiltredelse_without,
+            "pdf_fig_stilling_with": pdf_fig_stilling_with,
+            "pdf_fig_stilling_without": pdf_fig_stilling_without,
         }
 
     pdf_options = st.session_state.pdf_options
+    new_hire_cutoff_str = cutoff_date_value.strftime("%d.%m.%Y")
 
     TILTREDELSE_AXIS = ("Ansiennitet (År)", "Ansiennitet (år) siden tiltredelse")
     STILLING_AXIS = ("Stillingsansiennitet (År)", "Stillingsansiennitet (år)")
-    if not position_seniority_col:
-        pdf_x_axes = [TILTREDELSE_AXIS]
-    elif pdf_x_axis_mode == "stillingsansiennitet":
-        pdf_x_axes = [STILLING_AXIS]
-    elif pdf_x_axis_mode == "begge":
-        pdf_x_axes = [TILTREDELSE_AXIS, STILLING_AXIS]
-    else:
-        pdf_x_axes = [TILTREDELSE_AXIS]
+    pdf_x_axes = []
+    if pdf_options.get("pdf_fig_tiltredelse_with", True):
+        pdf_x_axes.append((*TILTREDELSE_AXIS, False))
+    if pdf_options.get("pdf_fig_tiltredelse_without", False):
+        pdf_x_axes.append((*TILTREDELSE_AXIS, True))
+    if position_seniority_col:
+        if pdf_options.get("pdf_fig_stilling_with", False):
+            pdf_x_axes.append((*STILLING_AXIS, False))
+        if pdf_options.get("pdf_fig_stilling_without", False):
+            pdf_x_axes.append((*STILLING_AXIS, True))
+    if not pdf_x_axes:
+        # Ingen avkrysset - fall tilbake på standardfiguren slik at eksporten aldri blir tom.
+        pdf_x_axes = [(*TILTREDELSE_AXIS, False)]
 
     if union_values:
         st.markdown("**Hurtigeksport per fagforening:**")
@@ -646,7 +769,7 @@ try:
                     with st.spinner(f"Genererer PDF-rapporter for {uv}..."):
                         zip_bytes = build_export_zip(
                             members, df, st.session_state.outliers_by_code, "_hash", unit_col,
-                            pdf_x_axes, pdf_options, report_date_str,
+                            pdf_x_axes, pdf_options, report_date_str, new_hire_cutoff_str,
                         )
                     st.session_state[f"_union_zip_{uv}"] = zip_bytes
             with dl_col:
@@ -678,7 +801,7 @@ try:
         with st.spinner("Genererer PDF-rapporter..."):
             zip_bytes = build_export_zip(
                 export_selection, df, st.session_state.outliers_by_code, "_hash", unit_col,
-                pdf_x_axes, pdf_options, report_date_str,
+                pdf_x_axes, pdf_options, report_date_str, new_hire_cutoff_str,
             )
         st.session_state["_export_zip_bytes"] = zip_bytes
 
@@ -711,6 +834,12 @@ try:
             "display_columns": st.session_state.display_columns,
             "x_axis_choice": x_col,
             "pdf_options": pdf_options,
+            "new_hire_settings": {
+                "cutoff_date": cutoff_date_value.isoformat(),
+                "show_regression_with_new_hires": show_regression_with_new_hires,
+                "show_regression_without_new_hires": show_regression_without_new_hires,
+                "hide_new_hires_live": hide_new_hires_live,
+            },
         },
     )
 

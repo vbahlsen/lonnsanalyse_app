@@ -13,26 +13,22 @@ OPTIONAL_POSITION_SENIORITY_SYNONYMS = ["Stillingsansiennitet"]
 OPTIONAL_UNION_SYNONYMS = ["Fagforening"]
 
 
-def calculate_years_of_service(start_date):
-    """Beregner ansiennitet i år fra en startdato.
+def parse_date_flexible(value):
+    """Tolker en dato fra typiske Excel-verdier (ekte dato-/tidsstempel eller
+    tekst i vanlige formater: dd.mm.åååå, åååå-mm-dd, dd/mm/åååå, osv.).
 
-    Godtar ekte dato-/tidsstempelverdier og tekst i flere vanlige formater
-    (dd.mm.åååå, åååå-mm-dd, dd/mm/åååå, osv.). Returnerer np.nan (ikke 0.0)
-    når datoen mangler eller ikke lar seg tolke, slik at slike rader kan
-    ekskluderes fra analysen i stedet for å bli feilaktig talt som "nyansatt"
-    - noe som tidligere kunne kollapse hele stillingskoder til identisk
-    ansiennitet og krasje regresjonen.
+    Returnerer et datetime-objekt, eller None hvis verdien mangler eller ikke
+    lar seg tolke.
     """
-    if pd.isna(start_date):
-        return np.nan
+    if pd.isna(value):
+        return None
 
-    date_obj = None
-    if isinstance(start_date, datetime):
-        date_obj = start_date
-    elif isinstance(start_date, str):
-        text = start_date.strip()
+    if isinstance(value, datetime):
+        return value
+    elif isinstance(value, str):
+        text = value.strip()
         try:
-            date_obj = datetime.strptime(text, "%d.%m.%Y")
+            return datetime.strptime(text, "%d.%m.%Y")
         except ValueError:
             # Prøv pandas' formatgjenkjenning først (håndterer bl.a. åååå-mm-dd
             # uten tvetydighet), fall tilbake på dayfirst=True for dd/mm/åååå-stil.
@@ -40,17 +36,43 @@ def calculate_years_of_service(start_date):
             if pd.isna(parsed):
                 parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
             if pd.notna(parsed):
-                date_obj = parsed.to_pydatetime()
+                return parsed.to_pydatetime()
+        return None
     else:
-        parsed = pd.to_datetime(start_date, dayfirst=True, errors="coerce")
+        parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
         if pd.notna(parsed):
-            date_obj = parsed.to_pydatetime() if hasattr(parsed, "to_pydatetime") else parsed
+            return parsed.to_pydatetime() if hasattr(parsed, "to_pydatetime") else parsed
+        return None
 
+
+def calculate_years_of_service(start_date):
+    """Beregner ansiennitet i år fra en startdato.
+
+    Returnerer np.nan (ikke 0.0) når datoen mangler eller ikke lar seg tolke,
+    slik at slike rader kan ekskluderes fra analysen i stedet for å bli
+    feilaktig talt som "nyansatt" - noe som tidligere kunne kollapse hele
+    stillingskoder til identisk ansiennitet og krasje regresjonen.
+    """
+    date_obj = parse_date_flexible(start_date)
     if date_obj is None:
         return np.nan
 
     diff = datetime.now() - date_obj
     return round(diff.days / 365.25, 2)
+
+
+def is_new_hire(start_date, cutoff_date) -> bool:
+    """True hvis start_date er på eller etter cutoff_date.
+
+    cutoff_date er et date-objekt (f.eks. fra st.date_input). Returnerer
+    False hvis cutoff_date mangler eller start_date ikke lar seg tolke.
+    """
+    if cutoff_date is None:
+        return False
+    date_obj = parse_date_flexible(start_date)
+    if date_obj is None:
+        return False
+    return date_obj.date() >= cutoff_date
 
 
 def detect_column_mapping(df_columns: list[str], saved_mapping: dict | None = None) -> dict[str, str | None]:
@@ -172,22 +194,36 @@ def run_regression_per_code(
     outliers_by_code: dict[str, list[str]],
     x_col: str = "Ansiennitet (År)",
     hash_col: str = "_hash",
+    new_hire_mask: pd.Series | None = None,
+    exclude_new_hires: bool = False,
+    write_columns: bool = True,
 ) -> dict:
     """Kjører separat lineær regresjon (Årslønn vs. x_col) per stillingskode.
 
-    Outliers (identifisert via hash_col mot outliers_by_code) ekskluderes fra
-    regresjonen for sin stillingskode. Returnerer et dict per kode med
-    slope/intercept/r_squared/std_residual/n, og skriver 'Forventet Lønn' /
+    Outliers (identifisert via hash_col mot outliers_by_code) ekskluderes alltid
+    fra regresjonen for sin stillingskode. Hvis exclude_new_hires er True,
+    ekskluderes i tillegg ansatte markert i new_hire_mask (bruken av dette er
+    å kunne sammenligne trenden med/uten nyansatte, f.eks. i koder med høy
+    turnover hvor ansiennitet før tiltredelse ikke er kjent).
+
+    Returnerer et dict per kode med slope/intercept/r_squared/std_residual/n.
+    Hvis write_columns er True (standard) skrives også 'Forventet Lønn' /
     'Lønnsavvik (Kr)' inn i df for radene som inngikk i en gyldig regresjon
-    (NaN for rader uten gyldig verdi i x_col, f.eks. manglende Stillingsansiennitet).
+    (NaN for rader uten gyldig verdi i x_col, f.eks. manglende Stillingsansiennitet)
+    - denne baseres alltid på HELE datagrunnlaget (med nyansatte), uavhengig av
+    exclude_new_hires, slik at avviksvisningen for én enkelt ansatt forblir
+    konsistent uansett hvilke sammenligningslinjer som vises i plottet.
     """
     results = {}
-    df["Forventet Lønn"] = pd.NA
-    df["Lønnsavvik (Kr)"] = pd.NA
+    if write_columns:
+        df["Forventet Lønn"] = pd.NA
+        df["Lønnsavvik (Kr)"] = pd.NA
 
     for kode, group in df.groupby("Stillingskode"):
         outlier_hashes = set(outliers_by_code.get(str(kode), []))
         clean = group[~group[hash_col].isin(outlier_hashes)]
+        if exclude_new_hires and new_hire_mask is not None:
+            clean = clean[~new_hire_mask.loc[clean.index]]
 
         fit = fit_linear_regression(clean[x_col], clean["Årslønn"])
         if fit is None:
@@ -201,9 +237,10 @@ def run_regression_per_code(
             continue
 
         results[kode] = fit
-        expected = fit["intercept"] + fit["slope"] * group[x_col]
-        df.loc[group.index, "Forventet Lønn"] = expected
-        df.loc[group.index, "Lønnsavvik (Kr)"] = group["Årslønn"] - expected
+        if write_columns:
+            expected = fit["intercept"] + fit["slope"] * group[x_col]
+            df.loc[group.index, "Forventet Lønn"] = expected
+            df.loc[group.index, "Lønnsavvik (Kr)"] = group["Årslønn"] - expected
 
     return results
 

@@ -17,7 +17,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from analysis import confidence_band, fit_linear_regression, summary_stats
 from settlement_store import DEFAULT_PDF_OPTIONS
@@ -52,6 +52,12 @@ def _render_density_cloud(ax, x_data, y_data) -> bool:
     """
     x = np.asarray(x_data, dtype=float)
     y = np.asarray(y_data, dtype=float)
+    # Rader med manglende verdi (f.eks. ansatte uten utfylt Stillingsansiennitet) må
+    # filtreres bort FØR lengde-/variasjonssjekken og KDE-en - ellers forblir NaN i
+    # datasettet, gaussian_kde feiler stille via except-blokken under, og hele skyen
+    # uteblir selv om det finnes rikelig med gyldige punkter blant de andre.
+    finite_mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[finite_mask], y[finite_mask]
     if len(x) < 5 or np.ptp(x) <= 0 or np.ptp(y) <= 0:
         return False
 
@@ -80,18 +86,33 @@ def _render_chart(
     show_axis_values: bool,
     colleague_display: str = "points",
     show_mean_line: bool = False,
+    mean_basis_df=None,
 ) -> io.BytesIO:
     fig, ax = plt.subplots(figsize=(13, 7))
 
+    new_hire_col = "Er Nyansatt"
+    has_new_hire_info = new_hire_col in code_clean_df.columns
+    new_hire_df = code_clean_df[code_clean_df[new_hire_col]] if has_new_hire_info else code_clean_df.iloc[0:0]
+
     if colleague_display == "points":
+        base_df = code_clean_df[~code_clean_df[new_hire_col]] if has_new_hire_info else code_clean_df
         ax.scatter(
-            code_clean_df[x_col],
-            code_clean_df["Årslønn"],
+            base_df[x_col],
+            base_df["Årslønn"],
             color="#7a8a99",
             s=40,
             label="Kollegaer i samme stillingskode",
             zorder=2,
         )
+        if not new_hire_df.empty:
+            # Ring rundt punktet (i stedet for stripete fylling, som matplotlib/scatter
+            # ikke støtter) - samme teknikk som brukes i liveplottet, slik at nyansatte
+            # er tydelig merket uten å skjule hvor de faktisk ligger i lønnsbildet.
+            ax.scatter(
+                new_hire_df[x_col], new_hire_df["Årslønn"],
+                facecolors="#7a8a99", edgecolors="#e07b00", linewidths=2, s=55,
+                label="Nyansatt kollega", zorder=2.3,
+            )
     elif colleague_display == "heatmap":
         drawn = _render_density_cloud(ax, code_clean_df[x_col], code_clean_df["Årslønn"])
         if drawn:
@@ -106,6 +127,9 @@ def _render_chart(
         y_margin = (y_vals.max() - y_vals.min()) * 0.08 or 1
         ax.set_xlim(x_vals.min() - x_margin, x_vals.max() + x_margin)
         ax.set_ylim(y_vals.min() - y_margin, y_vals.max() + y_margin)
+        # NB: ingen ring-markering av nyansatte her - poenget med tetthetssky-modus er
+        # nettopp å anonymisere kollegaene, og et ring-merket enkeltpunkt ville
+        # identifisere en person selv om resten av skyen er diffus.
     # colleague_display == "hidden" -> ikke tegn kollegaene i det hele tatt
 
     if fit:
@@ -118,7 +142,8 @@ def _render_chart(
             ax.fill_between(x_range, ci_lower, ci_upper, color="black", alpha=0.08, label="95% konfidensintervall")
 
     if show_mean_line:
-        mean_salary = code_clean_df["Årslønn"].mean()
+        basis_df = mean_basis_df if mean_basis_df is not None else code_clean_df
+        mean_salary = basis_df["Årslønn"].mean()
         ax.axhline(mean_salary, color="#2a9d8f", linewidth=1.5, label="Snitt i stillingskoden")
 
     ax.scatter(
@@ -163,12 +188,22 @@ def build_employee_pdf(
     code_clean_df,
     unit_col: str | None,
     is_outlier: bool,
-    x_axes: list[tuple[str, str]] | None = None,
+    x_axes: list[tuple[str, str, bool]] | None = None,
     pdf_options: dict | None = None,
     report_date: str | None = None,
+    new_hire_cutoff_str: str | None = None,
 ) -> bytes:
+    """x_axes er en liste av (x_col, x_label, exclude_new_hires) - én figur per
+    oppføring. exclude_new_hires styrer kun hvilket datagrunnlag trendlinjen/
+    konfidensintervallet/snittlinjen for DEN figuren beregnes fra; kollegaenes
+    punkter (inkl. nyansatte, ring-merket) vises uansett for kontekst."""
     options = {**DEFAULT_PDF_OPTIONS, **(pdf_options or {})}
-    x_axes = x_axes or [("Ansiennitet (År)", "Ansiennitet (år)")]
+    x_axes = x_axes or [("Ansiennitet (År)", "Ansiennitet (år)", False)]
+    # Nyansatt-henvisningen (overskrift-suffiks og figurtekst) er kun til nytte når
+    # eksporten faktisk inneholder BÅDE en "med" og en "uten"-variant å skille mellom -
+    # eksporterer man kun "med nyansatte" er den bare forvirrende støy, siden det uansett
+    # ikke finnes noe å sammenligne med i denne PDF-en.
+    has_exclusion_variant = any(axis[2] for axis in x_axes)
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("CompactTitle", parent=styles["Title"], fontSize=16, leading=19, spaceAfter=4)
@@ -224,7 +259,7 @@ def build_employee_pdf(
     elements.append(Spacer(1, 0.2 * cm))
 
     figure_number = 0
-    for x_col, x_label in x_axes:
+    for x_col, x_label, exclude_new_hires in x_axes:
         if x_col not in code_clean_df.columns or pd.isna(employee_row.get(x_col)):
             elements.append(
                 Paragraph(f"Mangler verdi for {x_label.lower()} - kan ikke vise denne figuren.", styles["Italic"])
@@ -233,28 +268,48 @@ def build_employee_pdf(
             continue
 
         figure_number += 1
-        fit = fit_linear_regression(code_clean_df[x_col], code_clean_df["Årslønn"])
+        fit_basis_df = code_clean_df
+        if exclude_new_hires and "Er Nyansatt" in code_clean_df.columns:
+            fit_basis_df = code_clean_df[~code_clean_df["Er Nyansatt"]]
+        fit = fit_linear_regression(fit_basis_df[x_col], fit_basis_df["Årslønn"])
 
-        elements.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden", heading_style))
+        # Hvert figur-avsnitt (overskrift + bilde + billedtekst + evt. avvikstekst) samles
+        # i én KeepTogether-blokk, slik at PDF-en aldri bryter siden midt mellom en
+        # overskrift og figuren den hører til - selv når eksporten har flere enn 2 figurer
+        # og dermed ikke lenger nødvendigvis holder seg til én side totalt.
+        block = []
+        variant_suffix = (
+            " – uten nyansatte" if exclude_new_hires
+            else (" – med nyansatte" if new_hire_cutoff_str and has_exclusion_variant else "")
+        )
+        block.append(Paragraph(f"Lønn vs. {x_label.lower()} for stillingskoden{variant_suffix}", heading_style))
         chart_buf = _render_chart(
             employee_row, code_clean_df, is_outlier, fit, x_col, x_label, options["show_axis_values"],
             options.get("colleague_display", "points"), options.get("show_mean_line", False),
+            mean_basis_df=fit_basis_df,
         )
         if options["show_avvik_text"]:
             img_width, img_height = 13 * cm, 7 * cm
         else:
             # Mer plass å ta av når avviksforklaringen er slått av - gjør figuren litt større.
             img_width, img_height = 13.5 * cm, 7.27 * cm
-        elements.append(Image(chart_buf, width=img_width, height=img_height))
-        elements.append(Spacer(1, 0.06 * cm))
-        elements.append(
+        block.append(Image(chart_buf, width=img_width, height=img_height))
+        block.append(Spacer(1, 0.06 * cm))
+
+        caption_extra = ""
+        if new_hire_cutoff_str:
+            if exclude_new_hires:
+                caption_extra = f" Ansatte tilsatt {new_hire_cutoff_str} eller senere er ekskludert fra beregningsgrunnlaget."
+            elif has_exclusion_variant:
+                caption_extra = f" Inkluderer ansatte tilsatt {new_hire_cutoff_str} eller senere."
+        block.append(
             Paragraph(
                 f"<b>Figur {figure_number}:</b> Regresjonsanalyse av lønn i 100 % stillinger for stillingskode "
-                f"{employee_row['Stillingskode']}, som funksjon av {x_label.lower()}.",
+                f"{employee_row['Stillingskode']}, som funksjon av {x_label.lower()}.{caption_extra}",
                 caption_style,
             )
         )
-        elements.append(Spacer(1, 0.14 * cm))
+        block.append(Spacer(1, 0.14 * cm))
 
         if fit and not is_outlier and options["show_avvik_text"]:
             avvik = employee_row["Årslønn"] - (fit["intercept"] + fit["slope"] * employee_row[x_col])
@@ -263,18 +318,20 @@ def build_employee_pdf(
             if fit["std_residual"] and fit["std_residual"] > 1e-9:
                 z = abs(avvik) / fit["std_residual"]
                 z_text = f", tilsvarende {z:.1f} standardavvik {retning} trendlinjen"
-            elements.append(
+            block.append(
                 Paragraph(
                     f"Avvik fra trendlinje: {_format_kr(abs(avvik))} {retning} forventet lønnsnivå for "
                     f"{x_label.lower()} og stillingskode{z_text}.",
                     styles["Normal"],
                 )
             )
-            elements.append(Spacer(1, 0.25 * cm))
+            block.append(Spacer(1, 0.25 * cm))
+
+        elements.append(KeepTogether(block))
 
     stats_fields = [f for f in options["stats_fields"] if f in dict(KEY_LABELS)]
     if stats_fields:
-        elements.append(Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", heading_style))
+        stats_block = [Paragraph(f"Nøkkeltall for stillingskode {employee_row['Stillingskode']}", heading_style)]
         stats = summary_stats(code_clean_df)
         label_lookup = dict(KEY_LABELS)
         stats_rows = [["Nøkkeltall", "Verdi"]] + [
@@ -293,7 +350,8 @@ def build_employee_pdf(
                 ]
             )
         )
-        elements.append(stats_table)
+        stats_block.append(stats_table)
+        elements.append(KeepTogether(stats_block))
 
     if is_outlier:
         elements.append(Spacer(1, 0.4 * cm))
@@ -316,9 +374,10 @@ def build_export_zip(
     outliers_by_code: dict,
     hash_col: str,
     unit_col: str | None,
-    x_axes: list[tuple[str, str]] | None = None,
+    x_axes: list[tuple[str, str, bool]] | None = None,
     pdf_options: dict | None = None,
     report_date: str | None = None,
+    new_hire_cutoff_str: str | None = None,
 ) -> bytes:
     from analysis import non_outlier_rows
 
@@ -332,7 +391,8 @@ def build_export_zip(
             is_outlier = employee_row[hash_col] in set(outliers_by_code.get(str(stillingskode), []))
 
             pdf_bytes = build_employee_pdf(
-                employee_row, code_clean_df, unit_col, is_outlier, x_axes, pdf_options, report_date
+                employee_row, code_clean_df, unit_col, is_outlier, x_axes, pdf_options, report_date,
+                new_hire_cutoff_str,
             )
 
             base_name = _sanitize_filename(full_name)
