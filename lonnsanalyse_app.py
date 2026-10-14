@@ -3,6 +3,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 import analysis
@@ -81,8 +82,8 @@ if current_name != picked:
     # stillingskode-filter og outlier-avkrysninger fra forrige oppgjør lekke inn i det nye.
     stale_prefixes = ("outlier_toggle_", "map_", "union_highlight_", "union_export_btn_", "union_dl_")
     stale_keys = (
-        "file_path_widget", "employee_selector", "column_selector", "export_selection",
-        "stillingskode_filter", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
+        "file_path_widget", "employee_selector", "employee_search", "column_selector", "export_selection",
+        "stillingskode_filter", "multi_code_mode", "x_axis_radio", "pdf_stats_fields", "pdf_show_axis_values", "pdf_show_avvik_text",
         "pdf_x_axis_mode_radio", "pdf_report_date", "pdf_colleague_display", "pdf_show_mean_line",
         "new_hire_cutoff_widget", "show_regression_with_new_hires", "show_regression_without_new_hires",
         "hide_new_hires_live", "pdf_fig_tiltredelse_with", "pdf_fig_tiltredelse_without",
@@ -109,6 +110,7 @@ if current_name != picked:
     st.session_state["hide_new_hires_live"] = new_hire_settings["hide_new_hires_live"]
     st.session_state.pending_selected_employee_hash = settlement.get("last_selected_employee_hash")
     st.session_state.pending_selected_codes = settlement.get("selected_codes")
+    st.session_state["multi_code_mode"] = settlement.get("multi_code_mode", True)
     st.session_state.selected_employee = None
     st.session_state.data_loaded_ok = False
     st.session_state.pop("_export_zip_bytes", None)
@@ -128,6 +130,7 @@ st.session_state.setdefault("new_hire_cutoff_widget", date.today())
 st.session_state.setdefault("show_regression_with_new_hires", True)
 st.session_state.setdefault("show_regression_without_new_hires", False)
 st.session_state.setdefault("hide_new_hires_live", False)
+st.session_state.setdefault("multi_code_mode", True)
 
 # --- DATAFIL ---
 
@@ -245,11 +248,66 @@ try:
             if valid_codes:
                 st.session_state["stillingskode_filter"] = valid_codes
 
+        # Valgt ansatt fra en stillingskode som ikke er med i filteret: legg koden til
+        # (satt som "pending" i forrige kjøring, siden filteret da allerede var instansiert).
+        # Mangler nøkkelen helt bruker widgeten default=all_codes, som alt inneholder koden.
+        # I enkeltkode-modus erstatter koden i stedet det som var valgt fra før.
+        pending_add_code = st.session_state.pop("pending_add_code", None)
+        if pending_add_code in all_codes:
+            if not st.session_state.multi_code_mode:
+                st.session_state["stillingskode_filter"] = [pending_add_code]
+            elif "stillingskode_filter" in st.session_state:
+                current_codes = list(st.session_state["stillingskode_filter"])
+                if pending_add_code not in current_codes:
+                    st.session_state["stillingskode_filter"] = current_codes + [pending_add_code]
+
+        selected_employee_code = None
+        if st.session_state.get("selected_employee"):
+            emp_match = df.loc[df["Fullt Navn"] == st.session_state.selected_employee, "Stillingskode"]
+            if not emp_match.empty:
+                selected_employee_code = emp_match.iloc[0]
+
+        def _on_multi_code_mode_change(preferred_code):
+            # Byttet til enkeltkode-modus med flere koder valgt: behold koden til valgt
+            # ansatt hvis den er blant dem, ellers den første. Callbacks kjører før
+            # widgetene instansieres, så her er det lov å skrive til filterets nøkkel.
+            if st.session_state.multi_code_mode:
+                return
+            current = list(st.session_state.get("stillingskode_filter", all_codes))
+            if len(current) > 1:
+                keep = preferred_code if preferred_code in current else current[0]
+                st.session_state["stillingskode_filter"] = [keep]
+
+        def _on_code_filter_change():
+            # Enkeltkode-modus: nylig valgt kode (lagt til sist av multiselect) erstatter forrige.
+            codes = st.session_state.get("stillingskode_filter", [])
+            if not st.session_state.multi_code_mode and len(codes) > 1:
+                st.session_state["stillingskode_filter"] = [codes[-1]]
+
+        st.checkbox(
+            "Tillat flere aktive stillingskoder samtidig",
+            key="multi_code_mode",
+            on_change=_on_multi_code_mode_change,
+            args=(selected_employee_code,),
+            help="Når denne er av kan kun én stillingskode være aktiv om gangen - valg av ny kode "
+            "(i menyen eller ved å velge en ansatt i en annen kode) erstatter den forrige.",
+        )
+
+        if not st.session_state.multi_code_mode and len(st.session_state.get("stillingskode_filter", all_codes)) > 1:
+            # F.eks. lagret oppgjør med flere koder, åpnet i enkeltkode-modus.
+            current = list(st.session_state.get("stillingskode_filter", all_codes))
+            st.session_state["stillingskode_filter"] = (
+                [selected_employee_code] if selected_employee_code in current else current[:1]
+            )
+
         selected_codes = st.multiselect(
-            "Stillingskode(r) for visning (regresjon kjøres alltid per kode, på hele datasettet):",
+            "Stillingskode(r) for visning (regresjon kjøres alltid per kode, på hele datasettet):"
+            if st.session_state.multi_code_mode
+            else "Stillingskode for visning (regresjon kjøres alltid per kode, på hele datasettet):",
             options=all_codes,
             default=all_codes,
             key="stillingskode_filter",
+            on_change=_on_code_filter_change,
         )
 
         x_col = "Ansiennitet (År)"
@@ -305,14 +363,18 @@ try:
 
     filtered_df = df[df["Stillingskode"].isin(selected_codes)].copy()
 
-    if filtered_df.empty:
-        st.warning("Ingen ansatte funnet for de valgte stillingskodene.")
-        st.stop()
-
-    def _is_outlier(row):
-        return row["_hash"] in set(st.session_state.outliers_by_code.get(str(row["Stillingskode"]), []))
-
-    filtered_df["Is Outlier"] = filtered_df.apply(_is_outlier, axis=1)
+    # Bygges med listeuttrykk i stedet for DataFrame.apply, som returnerer en DataFrame
+    # (ikke en Series) når filtered_df er tom - f.eks. når ingen stillingskode er valgt.
+    # Eksplisitt bool-dtype: en tom object-kolonne brukt som maske under ville ellers blitt
+    # tolket som kolonnevalg og fjernet alle kolonnene.
+    filtered_df["Is Outlier"] = pd.Series(
+        [
+            h in set(st.session_state.outliers_by_code.get(str(k), []))
+            for h, k in zip(filtered_df["_hash"], filtered_df["Stillingskode"])
+        ],
+        index=filtered_df.index,
+        dtype=bool,
+    )
     clean_filtered_df = filtered_df[~filtered_df["Is Outlier"]]
 
     union_values = []
@@ -354,19 +416,25 @@ try:
             plot_df.loc[sel_mask, "Farge"] = "🔴 VALGT ANSATT"
             plot_df.loc[sel_mask, "Størrelse"] = 13
 
-        fig = px.scatter(
-            plot_df,
-            x=x_col,
-            y="Årslønn",
-            color="Farge",
-            size="Størrelse",
-            symbol="Symbol",
-            symbol_map={"circle-open": "circle-open", "circle": "circle"},
-            custom_data=["Fullt Navn"],
-            hover_data=["Fullt Navn", "Stillingskode", "Is Outlier", "Lønnsavvik (Kr)"],
-            title="Årslønn mot ansiennitet (åpen sirkel = markert outlier)",
-            color_discrete_map={"🔴 VALGT ANSATT": "red", **code_color_map, **union_color_map},
-        )
+        if plot_df.empty:
+            # Ingen kode valgt (eller alle skjult) - vis et tomt diagram i stedet for å
+            # stoppe siden, slik at resten av grensesnittet fortsatt er tilgjengelig.
+            fig = go.Figure()
+            fig.update_layout(title="Årslønn mot ansiennitet (ingen data å vise)", yaxis_title="Årslønn")
+        else:
+            fig = px.scatter(
+                plot_df,
+                x=x_col,
+                y="Årslønn",
+                color="Farge",
+                size="Størrelse",
+                symbol="Symbol",
+                symbol_map={"circle-open": "circle-open", "circle": "circle"},
+                custom_data=["Fullt Navn"],
+                hover_data=["Fullt Navn", "Stillingskode", "Is Outlier", "Lønnsavvik (Kr)"],
+                title="Årslønn mot ansiennitet (åpen sirkel = markert outlier)",
+                color_discrete_map={"🔴 VALGT ANSATT": "red", **code_color_map, **union_color_map},
+            )
 
         highlighted_mask = plot_df["Farge"].astype(str).str.startswith("🟦")
         if highlighted_mask.any():
@@ -481,19 +549,28 @@ try:
 
     with col_stats:
         st.markdown("##### 📊 Statistisk Sammendrag")
-        st.caption(f"Valgte koder: {', '.join(str(c) for c in selected_codes)} · {len(clean_filtered_df)} ansatte (ekskl. outliers)")
+        codes_text = ", ".join(str(c) for c in selected_codes) if selected_codes else "ingen"
+        st.caption(f"Valgte koder: {codes_text} · {len(clean_filtered_df)} ansatte (ekskl. outliers)")
 
-        if clean_filtered_df.empty:
+        if not selected_codes:
+            st.info("Velg én eller flere stillingskoder for å fylle inn statistikk og graf.")
+        elif clean_filtered_df.empty:
             st.info("Alle valgte ansatte er markert som outliers - ingen datagrunnlag for statistikk.")
-        else:
-            stats_rows = [
-                {"Nøkkeltall": "Median", "Verdi": f"kr {clean_filtered_df['Årslønn'].median():,.0f}".replace(",", " ")},
-                {"Nøkkeltall": "Gjennomsnitt", "Verdi": f"kr {clean_filtered_df['Årslønn'].mean():,.0f}".replace(",", " ")},
-                {"Nøkkeltall": "Standardavvik", "Verdi": f"kr {clean_filtered_df['Årslønn'].std():,.0f}".replace(",", " ")},
-                {"Nøkkeltall": "Kvartil 1 (25%)", "Verdi": f"kr {clean_filtered_df['Årslønn'].quantile(0.25):,.0f}".replace(",", " ")},
-                {"Nøkkeltall": "Kvartil 3 (75%)", "Verdi": f"kr {clean_filtered_df['Årslønn'].quantile(0.75):,.0f}".replace(",", " ")},
-            ]
-            st.dataframe(pd.DataFrame(stats_rows), hide_index=True, use_container_width=True, height=210)
+
+        salaries = clean_filtered_df["Årslønn"]
+
+        def _fmt_kr(value):
+            return "–" if pd.isna(value) else f"kr {value:,.0f}".replace(",", " ")
+
+        # Tabellen vises alltid, med "–" som verdi når det ikke er datagrunnlag.
+        stats_rows = [
+            {"Nøkkeltall": "Median", "Verdi": _fmt_kr(salaries.median())},
+            {"Nøkkeltall": "Gjennomsnitt", "Verdi": _fmt_kr(salaries.mean())},
+            {"Nøkkeltall": "Standardavvik", "Verdi": _fmt_kr(salaries.std())},
+            {"Nøkkeltall": "Kvartil 1 (25%)", "Verdi": _fmt_kr(salaries.quantile(0.25))},
+            {"Nøkkeltall": "Kvartil 3 (75%)", "Verdi": _fmt_kr(salaries.quantile(0.75))},
+        ]
+        st.dataframe(pd.DataFrame(stats_rows), hide_index=True, use_container_width=True, height=210)
 
         with st.popover("📈 Regresjon per stillingskode", use_container_width=True):
             st.caption(
@@ -525,30 +602,77 @@ try:
                             "Std.avvik (kr)": "–",
                         }
                     )
-            st.dataframe(pd.DataFrame(reg_table), hide_index=True, use_container_width=True)
+            st.dataframe(
+                pd.DataFrame(reg_table, columns=["Stillingskode", "N", "Stigning (kr/år)", "R²", "Std.avvik (kr)"]),
+                hide_index=True,
+                use_container_width=True,
+            )
 
-        employee_names = filtered_df.sort_values(by="Etternavn")["Fullt Navn"].tolist()
-        employee_options = [None] + employee_names
+        all_employee_names = df.sort_values(by="Etternavn")["Fullt Navn"].drop_duplicates().tolist()
+        code_by_name = df.drop_duplicates("Fullt Navn").set_index("Fullt Navn")["Stillingskode"].to_dict()
 
         # Samme prinsipp som for stillingskode-filteret over: skriv den lagrede verdien
         # direkte inn i "employee_selector" sin egen nøkkel FØR widgeten instansieres,
         # i stedet for å stole på "index=" (som ignoreres hvis nøkkelen alt finnes).
         pending_hash = st.session_state.pop("pending_selected_employee_hash", None)
         if pending_hash and "employee_selector" not in st.session_state:
-            match = filtered_df[filtered_df["_hash"] == pending_hash]
-            if not match.empty and match.iloc[0]["Fullt Navn"] in employee_options:
+            match = df[df["_hash"] == pending_hash]
+            if not match.empty:
                 st.session_state["employee_selector"] = match.iloc[0]["Fullt Navn"]
                 st.session_state.selected_employee = match.iloc[0]["Fullt Navn"]
 
+        # Streamlits innebygde søk i nedtrekksmenyen er "fuzzy" (f.eks. gir "Hauge" også
+        # treff på "Tram Vuong") og kan ikke styres. Derfor et eget søkefelt med presis
+        # matching som søker i hele datasettet, mens menyen uten søk kun viser de valgte kodene.
+        search_query = st.text_input(
+            "🔍 Søk etter ansatt (alle stillingskoder):",
+            key="employee_search",
+            placeholder="Fornavn, mellomnavn og/eller etternavn",
+            help="Hvert søkeord må matche starten av et av navnene, f.eks. finner \"ing hau\" "
+            "Ingrid Haug. Uten søk viser menyen under kun ansatte i valgte stillingskode(r).",
+        )
+        if search_query.strip():
+            employee_names = [n for n in all_employee_names if analysis.name_matches(n, search_query)]
+            if not employee_names:
+                st.caption("Ingen ansatte matcher søket.")
+        elif selected_codes:
+            in_codes = set(filtered_df["Fullt Navn"])
+            employee_names = [n for n in all_employee_names if n in in_codes]
+        else:
+            employee_names = all_employee_names
+
+        # Nåværende valg må alltid finnes blant alternativene, ellers nullstiller Streamlit menyen.
+        for current in (st.session_state.get("employee_selector"), st.session_state.get("selected_employee")):
+            if current and current in code_by_name and current not in employee_names:
+                employee_names = [current] + employee_names
+        employee_options = [None] + employee_names
+
+        # Streamlit regner en selectbox med endrede alternativer (nytt søk / nye koder) som
+        # en ny widget og nullstiller verdien. Skriv nåværende verdi eksplisitt tilbake før
+        # widgeten instansieres, slik at valget overlever at listen endres.
+        current_selection = st.session_state.get("employee_selector")
+        if current_selection in employee_options:
+            st.session_state["employee_selector"] = current_selection
+
+        def _clear_employee_search():
+            # Tøm søket når en ansatt er valgt, slik at menyen igjen viser valgt(e) kode(r).
+            st.session_state["employee_search"] = ""
+
         new_selected_employee = st.selectbox(
-            "👤 Velg ansatt for detaljvisning:",
+            "👤 Velg ansatt for detaljvisning:" if not search_query.strip() else "👤 Velg blant søketreff:",
             options=employee_options,
-            format_func=lambda x: "Ingen valgt" if x is None else x,
+            format_func=lambda x: "Ingen valgt" if x is None else f"{x} ({code_by_name.get(x, '?')})",
             key="employee_selector",
+            on_change=_clear_employee_search,
         )
 
         if new_selected_employee != st.session_state.get("selected_employee"):
             st.session_state.selected_employee = new_selected_employee
+            new_code = code_by_name.get(new_selected_employee)
+            if new_code is not None and new_code not in selected_codes:
+                # Filteret er allerede instansiert denne kjøringen - koden legges til
+                # i neste kjøring (se "pending_add_code" over stillingskode-filteret).
+                st.session_state["pending_add_code"] = new_code
             st.rerun()
 
     # --- DETALJVISNING FOR ANSATT ---
@@ -559,7 +683,7 @@ try:
 
         col_settings, col_details = st.columns([1, 2])
 
-        selected_row = filtered_df[filtered_df["Fullt Navn"] == st.session_state.selected_employee].iloc[0]
+        selected_row = df[df["Fullt Navn"] == st.session_state.selected_employee].iloc[0]
         stillingskode = selected_row["Stillingskode"]
         is_outlier = selected_row["_hash"] in set(st.session_state.outliers_by_code.get(str(stillingskode), []))
 
@@ -819,7 +943,7 @@ try:
 
     selected_hash = None
     if st.session_state.selected_employee:
-        match = filtered_df[filtered_df["Fullt Navn"] == st.session_state.selected_employee]
+        match = df[df["Fullt Navn"] == st.session_state.selected_employee]
         if not match.empty:
             selected_hash = match.iloc[0]["_hash"]
 
@@ -831,6 +955,7 @@ try:
             "outliers": st.session_state.outliers_by_code,
             "last_selected_employee_hash": selected_hash,
             "selected_codes": list(selected_codes),
+            "multi_code_mode": st.session_state.multi_code_mode,
             "display_columns": st.session_state.display_columns,
             "x_axis_choice": x_col,
             "pdf_options": pdf_options,

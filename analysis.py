@@ -1,5 +1,6 @@
 """Analyse-logikk: ansiennitet, kolonne-mapping og regresjon per stillingskode."""
 
+import re
 from datetime import datetime
 
 import numpy as np
@@ -11,6 +12,16 @@ REQUIRED_COLUMNS = ["Etternavn", "Fornavn", "Stillingskode", "Tiltredelsesdato",
 OPTIONAL_UNIT_SYNONYMS = ["Ansattenhet", "Enhet", "Avdeling"]
 OPTIONAL_POSITION_SENIORITY_SYNONYMS = ["Stillingsansiennitet"]
 OPTIONAL_UNION_SYNONYMS = ["Fagforening"]
+
+
+def name_matches(full_name: str, query: str) -> bool:
+    """Presis navnesøk: hvert søkeord må matche starten av et av navnene (fornavn,
+    mellomnavn eller etternavn, også hver del av dobbeltnavn med bindestrek).
+    Rekkefølgen på søkeordene spiller ingen rolle, og store/små bokstaver ignoreres.
+    """
+    words = [w for w in re.split(r"[\s\-]+", str(full_name).casefold()) if w]
+    tokens = [t for t in re.split(r"[\s\-]+", query.casefold()) if t]
+    return bool(tokens) and all(any(w.startswith(t) for w in words) for t in tokens)
 
 
 def parse_date_flexible(value):
