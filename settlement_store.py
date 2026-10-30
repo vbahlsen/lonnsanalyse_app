@@ -95,6 +95,18 @@ def save_settlement(name: str, data: dict) -> None:
     )
 
 
+def update_settlement(name: str, **fields) -> None:
+    data = load_settlement(name)
+    data.update(fields)
+    save_settlement(name, data)
+
+
+def delete_settlement(name: str) -> None:
+    path = _settlement_path(name)
+    if path.exists():
+        path.unlink()
+
+
 def employee_hash(fornavn: str, etternavn: str, stillingskode: str, tiltredelsesdato) -> str:
     key = "|".join(
         str(part).strip().lower()

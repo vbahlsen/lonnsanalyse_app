@@ -40,11 +40,20 @@ def _guess_initial_sidebar_state() -> str:
 st.set_page_config(
     layout="wide", page_title="Lønnsnivåanalyse mot Ansiennitet", initial_sidebar_state=_guess_initial_sidebar_state()
 )
+ADHOC_COLOR = "rgb(255,0,1)"
+
+# Ad-hoc-prikken gjenkjennes på sin unike farge (Plotly gir ikke trace-ene egne CSS-klasser),
+# og pulserer ved at en rød ring vokser ut og blekner. Animasjonen overstyrer Plotlys inline
+# stroke-stil; transform kan ikke brukes, siden Plotly plasserer punktet med transform-attributtet.
 st.markdown(
-    "<style>h3 {font-size: 1.3rem !important;} h4 {font-size: 1.1rem !important;}</style>",
+    "<style>h3 {font-size: 1.3rem !important;} h4 {font-size: 1.1rem !important;}"
+    "@keyframes adhocPulse {"
+    "0% {stroke: rgb(255,0,1); stroke-width: 0px; stroke-opacity: 0.9;}"
+    "100% {stroke: rgb(255,0,1); stroke-width: 28px; stroke-opacity: 0;}}"
+    '.js-plotly-plot path.point[style*="rgb(255, 0, 1)"] {animation: adhocPulse 1.3s ease-out infinite;}'
+    "</style>",
     unsafe_allow_html=True,
 )
-st.title("💰 Lønnsnivåanalyse mot Ansiennitet")
 
 # --- OPPGJØR-VELGER ---
 
@@ -73,6 +82,7 @@ if picked == "-- Nytt oppgjør --":
     )
     st.sidebar.button("Opprett oppgjør", disabled=not new_name.strip(), on_click=_create_settlement)
     st.sidebar.info("Opprett eller velg et oppgjør for å starte. Et oppgjør husker filsti, kolonnevalg og outlier-vurderinger mellom økter, uten å lagre personopplysninger.")
+    st.title("💰 Lønnsnivåanalyse mot Ansiennitet")
     st.stop()
 
 if current_name != picked:
@@ -87,7 +97,7 @@ if current_name != picked:
         "pdf_x_axis_mode_radio", "pdf_report_date", "pdf_colleague_display", "pdf_show_mean_line",
         "new_hire_cutoff_widget", "show_regression_with_new_hires", "show_regression_without_new_hires",
         "hide_new_hires_live", "pdf_fig_tiltredelse_with", "pdf_fig_tiltredelse_without",
-        "pdf_fig_stilling_with", "pdf_fig_stilling_without",
+        "pdf_fig_stilling_with", "pdf_fig_stilling_without", "admin_target",
     )
     for key in list(st.session_state.keys()):
         if key in stale_keys or key.startswith(stale_prefixes) or key.startswith("_union_zip_"):
@@ -98,6 +108,7 @@ if current_name != picked:
     st.session_state.outliers_by_code = settlement.get("outliers") or {}
     st.session_state.column_mapping = settlement.get("column_mapping")
     st.session_state.file_path_input = settlement.get("file_path") or ""
+    st.session_state["_pending_file_path"] = st.session_state.file_path_input
     st.session_state.display_columns = settlement.get("display_columns") or analysis.REQUIRED_COLUMNS
     st.session_state.x_axis_choice = settlement.get("x_axis_choice") or "Ansiennitet (År)"
     st.session_state.pdf_options = settlement.get("pdf_options") or dict(store.DEFAULT_PDF_OPTIONS)
@@ -117,7 +128,134 @@ if current_name != picked:
     st.rerun()
 
 settlement_name = st.session_state.settlement_name
+st.title(f"💰 {settlement_name}")
 st.sidebar.caption(f"Aktivt oppgjør: **{settlement_name}**")
+
+# --- ADMINISTRER OPPGJØR ---
+
+
+@st.cache_data(show_spinner=False)
+def _excel_columns(path: str, mtime: float) -> list[str]:
+    return [str(c).strip() for c in pd.read_excel(path, nrows=0).columns]
+
+
+def _reload_if_active(target: str) -> None:
+    # Får oppgjør-byttet over til å laste det aktive oppgjøret på nytt fra disk ved neste
+    # kjøring - ellers ville autolagringen nederst i scriptet skrevet over endringen med
+    # den gamle tilstanden fra session_state.
+    if target == st.session_state.get("settlement_name"):
+        st.session_state.pop("settlement_name", None)
+
+
+def _admin_save_path(target: str, key: str) -> None:
+    new_path = store.clean_path_string(st.session_state.get(key, ""))
+    store.update_settlement(target, file_path=new_path or None)
+    _reload_if_active(target)
+    st.session_state["admin_msg"] = ("✅", f"Filsti lagret for «{target}».")
+
+
+def _admin_save_columns(target: str, keys: dict[str, str]) -> None:
+    mapping = {logical: st.session_state.get(key) for logical, key in keys.items()}
+    if any(v is None for v in mapping.values()):
+        st.session_state["admin_msg"] = ("⚠️", "Velg en kolonne for alle feltene før du lagrer.")
+        return
+    if len(set(mapping.values())) != len(mapping):
+        st.session_state["admin_msg"] = ("⚠️", "Samme kolonne er valgt for flere felt - hvert felt må ha sin egen kolonne.")
+        return
+    store.update_settlement(target, column_mapping=mapping)
+    _reload_if_active(target)
+    st.session_state["admin_msg"] = ("✅", f"Kolonnevalg lagret for «{target}».")
+
+
+def _admin_reset_columns(target: str) -> None:
+    store.update_settlement(target, column_mapping=None)
+    _reload_if_active(target)
+    st.session_state["admin_msg"] = ("✅", f"«{target}» bruker nå automatisk kolonnegjenkjenning.")
+
+
+def _admin_delete(target: str) -> None:
+    store.delete_settlement(target)
+    st.session_state.pop(f"admin_confirm_delete_{target}", None)
+    st.session_state.pop("admin_target", None)
+    if target == st.session_state.get("settlement_name"):
+        remaining = store.list_settlements()
+        st.session_state["settlement_picker"] = remaining[0] if remaining else "-- Nytt oppgjør --"
+        st.session_state.pop("settlement_name", None)
+    st.session_state["admin_msg"] = ("🗑️", f"Oppgjøret «{target}» er slettet.")
+
+
+admin_msg = st.session_state.pop("admin_msg", None)
+if admin_msg:
+    st.toast(admin_msg[1], icon=admin_msg[0])
+
+with st.sidebar.expander("⚙️ Administrer oppgjør"):
+    # Fast (alfabetisk) rekkefølge: list_settlements() sorterer etter sist endret, og endret
+    # rekkefølge på options gjør at Streamlit ser på selectboxen som en ny widget og hopper
+    # til første element - f.eks. etter at et annet oppgjør enn det aktive er lagret.
+    all_settlements = sorted(store.list_settlements(), key=str.lower)
+    if st.session_state.get("admin_target") not in all_settlements:
+        st.session_state["admin_target"] = settlement_name
+    admin_target = st.selectbox("Oppgjør som skal administreres", all_settlements, key="admin_target")
+    target_settlement = store.load_settlement(admin_target)
+
+    st.markdown("**Filsti**")
+    saved_path = target_settlement.get("file_path") or ""
+    # Den lagrede verdien er en del av nøkkelen, slik at feltet viser ny verdi etter lagring
+    # (en widget med fast nøkkel ville beholdt det brukeren skrev inn sist).
+    path_key = f"admin_path_{admin_target}_{saved_path}"
+    st.text_input("Filsti", value=saved_path, key=path_key, label_visibility="collapsed")
+    resolved_target = store.resolve_data_file(saved_path)
+    if saved_path:
+        st.caption("✅ Filen finnes" if resolved_target else "⚠️ Finner ikke filen på lagret sti")
+    st.button("Lagre filsti", key=f"admin_save_path_{admin_target}", on_click=_admin_save_path, args=(admin_target, path_key))
+
+    st.markdown("**Hovedkolonner**")
+    file_columns = []
+    if not resolved_target:
+        st.caption("Lagre en gyldig filsti for å kunne velge kolonner.")
+    else:
+        try:
+            file_columns = _excel_columns(str(resolved_target), resolved_target.stat().st_mtime)
+        except Exception as e:
+            st.caption(f"Klarte ikke å lese kolonnene i filen: {e}")
+
+    if file_columns:
+        effective_mapping = analysis.detect_column_mapping(file_columns, target_settlement.get("column_mapping"))
+        map_keys = {}
+        for logical in analysis.REQUIRED_COLUMNS:
+            current = effective_mapping.get(logical)
+            map_keys[logical] = f"admin_map_{admin_target}_{logical}_{current}"
+            st.selectbox(
+                logical,
+                file_columns,
+                index=file_columns.index(current) if current in file_columns else None,
+                placeholder="-- velg kolonne --",
+                key=map_keys[logical],
+            )
+        st.caption(
+            "NB: Bytter du kolonne for Fornavn, Etternavn, Stillingskode eller Tiltredelsesdato, "
+            "gjenkjennes ikke lenger tidligere outlier-markeringer (de er knyttet til disse feltene)."
+        )
+        st.button(
+            "Lagre kolonnevalg", key=f"admin_save_cols_{admin_target}",
+            on_click=_admin_save_columns, args=(admin_target, map_keys),
+        )
+        if target_settlement.get("column_mapping"):
+            st.button(
+                "Tilbakestill til automatisk gjenkjenning", key=f"admin_reset_cols_{admin_target}",
+                on_click=_admin_reset_columns, args=(admin_target,),
+            )
+
+    st.markdown("**Slett oppgjør**")
+    confirm_delete = st.checkbox(
+        f"Ja, slett «{admin_target}» permanent, inkludert outlier-markeringer og innstillinger",
+        key=f"admin_confirm_delete_{admin_target}",
+    )
+    st.button(
+        "🗑️ Slett oppgjør", key=f"admin_delete_{admin_target}", disabled=not confirm_delete,
+        on_click=_admin_delete, args=(admin_target,),
+    )
+    st.caption("Selve Excel-filen med lønnsdata berøres ikke.")
 
 st.session_state.setdefault("outliers_by_code", {})
 st.session_state.setdefault("column_mapping", None)
@@ -135,9 +273,14 @@ st.session_state.setdefault("multi_code_mode", True)
 # --- DATAFIL ---
 
 st.sidebar.header("📄 Datafil")
+# Feltets verdi må settes via Session State, ikke value=: med fast key identifiserer Streamlit
+# feltet kun på nøkkelen, så nettleseren ville beholdt den gamle stien etter et oppgjørsbytte
+# (og sendt den tilbake ved neste klikk). Kun verdier satt via Session State sendes ut.
+if "_pending_file_path" in st.session_state:
+    st.session_state["file_path_widget"] = st.session_state.pop("_pending_file_path")
+st.session_state.setdefault("file_path_widget", st.session_state.file_path_input)
 path_input = st.sidebar.text_input(
     "Filsti til lønnsdata (Excel)",
-    value=st.session_state.file_path_input,
     key="file_path_widget",
     help="Siden appen kjører lokalt kan den lese filen direkte fra disk og huske stien til neste økt. "
     "Fungerer også med sti limt inn via 'Kopier som bane' i Utforsker.",
@@ -156,7 +299,7 @@ if cleaned_path:
                 # Feltet viser fortsatt det brukeren limte inn (f.eks. med anførselstegn
                 # fra "Kopier som bane") siden en widgets verdi ikke kan overstyres etter at
                 # den er instansiert i samme kjøring - rydd opp visningen på neste kjøring.
-                st.session_state.pop("file_path_widget", None)
+                st.session_state["_pending_file_path"] = str(resolved)
                 st.rerun()
         except Exception as e:
             st.sidebar.error(f"Klarte ikke å lese filen: {e}")
@@ -196,6 +339,12 @@ try:
         st.stop()
 
     rename_dict = {actual: logical for logical, actual in column_mapping.items() if actual != logical}
+    # Har filen allerede en kolonne med samme navn som et felt, men en annen kolonne er valgt
+    # for feltet, må den opprinnelige få nytt navn - ellers blir det to like kolonnenavn.
+    source_columns = set(column_mapping.values())
+    for logical in column_mapping:
+        if logical in df_raw.columns and logical not in source_columns:
+            rename_dict[logical] = f"{logical} (opprinnelig)"
     df = df_raw.rename(columns=rename_dict)
     unit_col = analysis.detect_unit_column(df.columns.tolist())
     position_seniority_col = analysis.detect_position_seniority_column(df.columns.tolist())
@@ -305,7 +454,9 @@ try:
             if st.session_state.multi_code_mode
             else "Stillingskode for visning (regresjon kjøres alltid per kode, på hele datasettet):",
             options=all_codes,
-            default=all_codes,
+            # default= kun når nøkkelen mangler - ellers advarer Streamlit om at verdien både
+            # har en default og er satt via Session State (gjenopprettet filter over).
+            default=None if "stillingskode_filter" in st.session_state else all_codes,
             key="stillingskode_filter",
             on_change=_on_code_filter_change,
         )
@@ -411,6 +562,14 @@ try:
                     union_color_map[f"🟦 {uv}-medlem"] = UNION_HIGHLIGHT_COLORS[i % len(UNION_HIGHLIGHT_COLORS)]
 
         currently_selected = st.session_state.get("selected_employee")
+        # Ad-hoc-lønnen gjelder kun den ansatte den ble tastet inn for. Alle måter å bytte ansatt
+        # på (klikk, meny, oppgjørsbytte) går via en ny kjøring, så det holder å sjekke her - før
+        # input-feltet instansieres lenger ned i col_stats. Verdien settes til None i stedet for å
+        # fjernes: bare en verdi satt via Session State sendes til nettleseren, ellers ville feltet
+        # fortsatt vist (og ved neste klikk sendt tilbake) det gamle tallet.
+        if st.session_state.get("_adhoc_owner") != currently_selected:
+            st.session_state["adhoc_salary"] = None
+            st.session_state["_adhoc_owner"] = currently_selected
         if currently_selected:
             sel_mask = plot_df["Fullt Navn"] == currently_selected
             plot_df.loc[sel_mask, "Farge"] = "🔴 VALGT ANSATT"
@@ -523,6 +682,28 @@ try:
                         name=f"Trend {kode} uten nyansatte (R²={r2['r_squared']:.2f})",
                         line=dict(width=2, color=line_color, dash="dash"),
                     )
+
+        adhoc_salary = st.session_state.get("adhoc_salary")
+        if currently_selected and adhoc_salary is not None:
+            sel_rows = df[df["Fullt Navn"] == currently_selected]
+            if not sel_rows.empty and pd.notna(sel_rows.iloc[0][x_col]):
+                sel_row = sel_rows.iloc[0]
+                fig.add_scatter(
+                    x=[sel_row[x_col], sel_row[x_col]],
+                    y=[sel_row["Årslønn"], adhoc_salary],
+                    mode="lines",
+                    line=dict(color="red", width=1.5, dash="dot"),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+                fig.add_scatter(
+                    x=[sel_row[x_col]],
+                    y=[adhoc_salary],
+                    mode="markers",
+                    marker=dict(size=14, color=ADHOC_COLOR, line=dict(width=0, color=ADHOC_COLOR)),
+                    name="🧪 Ad-hoc lønnsnivå",
+                    hovertemplate=f"Ad-hoc: kr {adhoc_salary:,.0f}<extra></extra>".replace(",", " "),
+                )
 
         fig.update_layout(height=750, xaxis_title=x_label, clickmode="event+select")
         click_event = st.plotly_chart(
@@ -674,6 +855,30 @@ try:
                 # i neste kjøring (se "pending_add_code" over stillingskode-filteret).
                 st.session_state["pending_add_code"] = new_code
             st.rerun()
+
+        if new_selected_employee:
+            adhoc_value = st.number_input(
+                "🧪 Prøv nytt lønnsnivå (kun visning, lagres ikke):",
+                min_value=0,
+                value=None,
+                step=10000,
+                key="adhoc_salary",
+                placeholder="f.eks. 650000",
+                help="Vises som en pulserende rød prikk i grafen. Forsvinner når du velger en annen ansatt.",
+            )
+            if adhoc_value is not None:
+                adhoc_row = df[df["Fullt Navn"] == new_selected_employee].iloc[0]
+                parts = [f"{adhoc_value - adhoc_row['Årslønn']:+,.0f} kr fra dagens lønn".replace(",", " ")]
+                expected = adhoc_row["Forventet Lønn"]
+                if pd.notna(expected):
+                    adhoc_avvik = adhoc_value - expected
+                    retning = "over" if adhoc_avvik > 0 else "under" if adhoc_avvik < 0 else "på"
+                    trend_text = f"{abs(adhoc_avvik):,.0f} kr {retning} trendlinjen".replace(",", " ")
+                    std_residual = reg_results.get(adhoc_row["Stillingskode"], {}).get("std_residual")
+                    if std_residual and std_residual > 1e-9:
+                        trend_text += f" ({abs(adhoc_avvik) / std_residual:.1f} std.avvik)"
+                    parts.append(trend_text)
+                st.caption(" · ".join(parts))
 
     # --- DETALJVISNING FOR ANSATT ---
 

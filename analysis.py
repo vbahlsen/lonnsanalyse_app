@@ -89,20 +89,21 @@ def is_new_hire(start_date, cutoff_date) -> bool:
 def detect_column_mapping(df_columns: list[str], saved_mapping: dict | None = None) -> dict[str, str | None]:
     """Forsøker å matche faktiske kolonnenavn mot de påkrevde logiske navnene.
 
-    Prioriterer eksakt (case-insensitive) match, deretter en tidligere lagret
-    mapping fra oppgjøret (hvis den faktiske kolonnen fortsatt finnes).
-    Manglende felter mappes til None og må fylles inn manuelt av brukeren.
+    Et lagret valg fra oppgjøret vinner (så lenge kolonnen fortsatt finnes), slik
+    at brukeren kan overstyre også når filen har en kolonne med det forventede
+    navnet. Deretter eksakt og case-insensitive navnematch. Manglende felter
+    mappes til None og må fylles inn manuelt av brukeren.
     """
     lower_lookup = {col.lower(): col for col in df_columns}
     mapping: dict[str, str | None] = {}
 
     for logical in REQUIRED_COLUMNS:
-        if logical in df_columns:
+        if saved_mapping and saved_mapping.get(logical) in df_columns:
+            mapping[logical] = saved_mapping[logical]
+        elif logical in df_columns:
             mapping[logical] = logical
         elif logical.lower() in lower_lookup:
             mapping[logical] = lower_lookup[logical.lower()]
-        elif saved_mapping and saved_mapping.get(logical) in df_columns:
-            mapping[logical] = saved_mapping[logical]
         else:
             mapping[logical] = None
 
