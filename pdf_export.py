@@ -369,7 +369,7 @@ def build_employee_pdf(
 
 
 def build_export_zip(
-    selected_employees: list[str],
+    selected_hashes: list[str],
     df,
     outliers_by_code: dict,
     hash_col: str,
@@ -384,8 +384,9 @@ def build_export_zip(
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         used_names = {}
-        for full_name in selected_employees:
-            employee_row = df[df["Fullt Navn"] == full_name].iloc[0]
+        for employee_hash in selected_hashes:
+            # Oppslag på hash, ikke navn: to ansatte med samme navn skal få hver sin rapport.
+            employee_row = df[df[hash_col] == employee_hash].iloc[0]
             stillingskode = employee_row["Stillingskode"]
             code_clean_df = non_outlier_rows(df, stillingskode, outliers_by_code, hash_col)
             is_outlier = employee_row[hash_col] in set(outliers_by_code.get(str(stillingskode), []))
@@ -395,7 +396,7 @@ def build_export_zip(
                 new_hire_cutoff_str,
             )
 
-            base_name = _sanitize_filename(full_name)
+            base_name = _sanitize_filename(employee_row["Fullt Navn"])
             count = used_names.get(base_name, 0)
             used_names[base_name] = count + 1
             filename = f"{base_name}.pdf" if count == 0 else f"{base_name}_{count + 1}.pdf"

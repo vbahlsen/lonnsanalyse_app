@@ -38,16 +38,17 @@ def parse_date_flexible(value):
         return value
     elif isinstance(value, str):
         text = value.strip()
-        try:
-            return datetime.strptime(text, "%d.%m.%Y")
-        except ValueError:
-            # Prøv pandas' formatgjenkjenning først (håndterer bl.a. åååå-mm-dd
-            # uten tvetydighet), fall tilbake på dayfirst=True for dd/mm/åååå-stil.
-            parsed = pd.to_datetime(text, errors="coerce")
-            if pd.isna(parsed):
-                parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
-            if pd.notna(parsed):
-                return parsed.to_pydatetime()
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        # Øvrige formater (f.eks. med klokkeslett) via pandas. Tekst som starter med årstall
+        # er ISO (åååå-mm-dd); alt annet tolkes med dayfirst=True - uten det tolkes tvetydige
+        # datoer som 03/04/2020 amerikansk (4. mars), og med det blir ISO feil (åååå-dd-mm).
+        parsed = pd.to_datetime(text, dayfirst=not re.match(r"\d{4}-", text), errors="coerce")
+        if pd.notna(parsed):
+            return parsed.to_pydatetime()
         return None
     else:
         parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")

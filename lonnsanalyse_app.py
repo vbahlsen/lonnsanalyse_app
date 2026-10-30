@@ -375,6 +375,31 @@ try:
         axis=1,
     )
 
+    # Ansatte identifiseres med _hash, ikke navn - to ansatte kan hete det samme, og et
+    # navneoppslag ville da gitt den første (f.eks. feil persons lønn i en PDF). Kun når
+    # navn, stillingskode og tiltredelsesdato er like, kan to rader ikke skilles fra hverandre.
+    duplicate_hash_mask = df["_hash"].duplicated(keep=False)
+    if duplicate_hash_mask.any():
+        st.warning(
+            "Følgende ansatte finnes flere ganger med samme navn, stillingskode og tiltredelsesdato, og kan "
+            "ikke skilles fra hverandre (kun den første raden brukes i detaljvisning og PDF): "
+            + ", ".join(sorted(set(df.loc[duplicate_hash_mask, "Fullt Navn"])))
+        )
+    unique_employees = df.drop_duplicates("_hash")
+    name_by_hash = unique_employees.set_index("_hash")["Fullt Navn"].to_dict()
+    code_by_hash = unique_employees.set_index("_hash")["Stillingskode"].to_dict()
+    # Samme navn i samme stillingskode: vis tiltredelsesdato i tillegg, så valget blir entydig.
+    same_name_and_code = unique_employees.duplicated(["Fullt Navn", "Stillingskode"], keep=False)
+    employee_label_by_hash = {
+        h: f"{name} ({code}, tiltrådt {analysis.parse_date_flexible(start).strftime('%d.%m.%Y')})"
+        if ambiguous else f"{name} ({code})"
+        for h, name, code, start, ambiguous in zip(
+            unique_employees["_hash"], unique_employees["Fullt Navn"], unique_employees["Stillingskode"],
+            unique_employees["Tiltredelsesdato"], same_name_and_code,
+        )
+    }
+    employee_hashes_by_name = unique_employees.sort_values(["Etternavn", "Fornavn"])["_hash"].tolist()
+
     # --- LAYOUT MED KOLONNER ---
     # col_plot rendres FØR col_stats' ansattvelger i koden (selv om col_stats vises til venstre)
     # slik at et klikk i grafen kan sette "employee_selector" trygt før den widgeten
@@ -410,11 +435,7 @@ try:
                 if pending_add_code not in current_codes:
                     st.session_state["stillingskode_filter"] = current_codes + [pending_add_code]
 
-        selected_employee_code = None
-        if st.session_state.get("selected_employee"):
-            emp_match = df.loc[df["Fullt Navn"] == st.session_state.selected_employee, "Stillingskode"]
-            if not emp_match.empty:
-                selected_employee_code = emp_match.iloc[0]
+        selected_employee_code = code_by_hash.get(st.session_state.get("selected_employee"))
 
         def _on_multi_code_mode_change(preferred_code):
             # Byttet til enkeltkode-modus med flere koder valgt: behold koden til valgt
@@ -571,7 +592,7 @@ try:
             st.session_state["adhoc_salary"] = None
             st.session_state["_adhoc_owner"] = currently_selected
         if currently_selected:
-            sel_mask = plot_df["Fullt Navn"] == currently_selected
+            sel_mask = plot_df["_hash"] == currently_selected
             plot_df.loc[sel_mask, "Farge"] = "🔴 VALGT ANSATT"
             plot_df.loc[sel_mask, "Størrelse"] = 13
 
@@ -589,7 +610,7 @@ try:
                 size="Størrelse",
                 symbol="Symbol",
                 symbol_map={"circle-open": "circle-open", "circle": "circle"},
-                custom_data=["Fullt Navn"],
+                custom_data=["_hash"],
                 hover_data=["Fullt Navn", "Stillingskode", "Is Outlier", "Lønnsavvik (Kr)"],
                 title="Årslønn mot ansiennitet (åpen sirkel = markert outlier)",
                 color_discrete_map={"🔴 VALGT ANSATT": "red", **code_color_map, **union_color_map},
@@ -685,7 +706,7 @@ try:
 
         adhoc_salary = st.session_state.get("adhoc_salary")
         if currently_selected and adhoc_salary is not None:
-            sel_rows = df[df["Fullt Navn"] == currently_selected]
+            sel_rows = df[df["_hash"] == currently_selected]
             if not sel_rows.empty and pd.notna(sel_rows.iloc[0][x_col]):
                 sel_row = sel_rows.iloc[0]
                 fig.add_scatter(
@@ -710,22 +731,21 @@ try:
             fig, use_container_width=True, on_select="rerun", selection_mode=("points",), key="main_scatter_chart"
         )
 
-        clicked_name = None
+        clicked_hash = None
         if click_event and click_event.get("selection") and click_event["selection"].get("points"):
             customdata = click_event["selection"]["points"][0].get("customdata")
             if customdata:
-                clicked_name = customdata[0]
+                clicked_hash = customdata[0]
 
-        if clicked_name and clicked_name != currently_selected:
-            match = filtered_df[filtered_df["Fullt Navn"] == clicked_name]
-            if not match.empty:
+        if clicked_hash and clicked_hash != currently_selected:
+            if (filtered_df["_hash"] == clicked_hash).any():
                 # "employee_selector" er IKKE instansiert ennå denne kjøringen (col_stats
                 # kjører etter col_plot i koden), så det er trygt å skrive rett inn i widgetens
                 # egen session_state-nøkkel her. Å kun fjerne nøkkelen og stole på "index=" (som
                 # tidligere) var upålitelig - nedtrekksmenyen kunne fortsatt vise sin gamle,
                 # persisterte verdi og til og med overskrive valget igjen ved neste rerun.
-                st.session_state["employee_selector"] = clicked_name
-                st.session_state.selected_employee = clicked_name
+                st.session_state["employee_selector"] = clicked_hash
+                st.session_state.selected_employee = clicked_hash
                 st.rerun()
 
     with col_stats:
@@ -789,18 +809,13 @@ try:
                 use_container_width=True,
             )
 
-        all_employee_names = df.sort_values(by="Etternavn")["Fullt Navn"].drop_duplicates().tolist()
-        code_by_name = df.drop_duplicates("Fullt Navn").set_index("Fullt Navn")["Stillingskode"].to_dict()
-
         # Samme prinsipp som for stillingskode-filteret over: skriv den lagrede verdien
         # direkte inn i "employee_selector" sin egen nøkkel FØR widgeten instansieres,
         # i stedet for å stole på "index=" (som ignoreres hvis nøkkelen alt finnes).
         pending_hash = st.session_state.pop("pending_selected_employee_hash", None)
-        if pending_hash and "employee_selector" not in st.session_state:
-            match = df[df["_hash"] == pending_hash]
-            if not match.empty:
-                st.session_state["employee_selector"] = match.iloc[0]["Fullt Navn"]
-                st.session_state.selected_employee = match.iloc[0]["Fullt Navn"]
+        if pending_hash in name_by_hash and "employee_selector" not in st.session_state:
+            st.session_state["employee_selector"] = pending_hash
+            st.session_state.selected_employee = pending_hash
 
         # Streamlits innebygde søk i nedtrekksmenyen er "fuzzy" (f.eks. gir "Hauge" også
         # treff på "Tram Vuong") og kan ikke styres. Derfor et eget søkefelt med presis
@@ -813,20 +828,20 @@ try:
             "Ingrid Haug. Uten søk viser menyen under kun ansatte i valgte stillingskode(r).",
         )
         if search_query.strip():
-            employee_names = [n for n in all_employee_names if analysis.name_matches(n, search_query)]
-            if not employee_names:
+            employee_hashes = [h for h in employee_hashes_by_name if analysis.name_matches(name_by_hash[h], search_query)]
+            if not employee_hashes:
                 st.caption("Ingen ansatte matcher søket.")
         elif selected_codes:
-            in_codes = set(filtered_df["Fullt Navn"])
-            employee_names = [n for n in all_employee_names if n in in_codes]
+            in_codes = set(filtered_df["_hash"])
+            employee_hashes = [h for h in employee_hashes_by_name if h in in_codes]
         else:
-            employee_names = all_employee_names
+            employee_hashes = employee_hashes_by_name
 
         # Nåværende valg må alltid finnes blant alternativene, ellers nullstiller Streamlit menyen.
         for current in (st.session_state.get("employee_selector"), st.session_state.get("selected_employee")):
-            if current and current in code_by_name and current not in employee_names:
-                employee_names = [current] + employee_names
-        employee_options = [None] + employee_names
+            if current and current in name_by_hash and current not in employee_hashes:
+                employee_hashes = [current] + employee_hashes
+        employee_options = [None] + employee_hashes
 
         # Streamlit regner en selectbox med endrede alternativer (nytt søk / nye koder) som
         # en ny widget og nullstiller verdien. Skriv nåværende verdi eksplisitt tilbake før
@@ -842,14 +857,14 @@ try:
         new_selected_employee = st.selectbox(
             "👤 Velg ansatt for detaljvisning:" if not search_query.strip() else "👤 Velg blant søketreff:",
             options=employee_options,
-            format_func=lambda x: "Ingen valgt" if x is None else f"{x} ({code_by_name.get(x, '?')})",
+            format_func=lambda h: "Ingen valgt" if h is None else employee_label_by_hash.get(h, "?"),
             key="employee_selector",
             on_change=_clear_employee_search,
         )
 
         if new_selected_employee != st.session_state.get("selected_employee"):
             st.session_state.selected_employee = new_selected_employee
-            new_code = code_by_name.get(new_selected_employee)
+            new_code = code_by_hash.get(new_selected_employee)
             if new_code is not None and new_code not in selected_codes:
                 # Filteret er allerede instansiert denne kjøringen - koden legges til
                 # i neste kjøring (se "pending_add_code" over stillingskode-filteret).
@@ -867,7 +882,7 @@ try:
                 help="Vises som en pulserende rød prikk i grafen. Forsvinner når du velger en annen ansatt.",
             )
             if adhoc_value is not None:
-                adhoc_row = df[df["Fullt Navn"] == new_selected_employee].iloc[0]
+                adhoc_row = df[df["_hash"] == new_selected_employee].iloc[0]
                 parts = [f"{adhoc_value - adhoc_row['Årslønn']:+,.0f} kr fra dagens lønn".replace(",", " ")]
                 expected = adhoc_row["Forventet Lønn"]
                 if pd.notna(expected):
@@ -882,13 +897,13 @@ try:
 
     # --- DETALJVISNING FOR ANSATT ---
 
-    if st.session_state.selected_employee:
+    if st.session_state.selected_employee in name_by_hash:
         st.markdown("---")
-        st.markdown(f"#### Detaljvisning: {st.session_state.selected_employee}")
+        st.markdown(f"#### Detaljvisning: {name_by_hash[st.session_state.selected_employee]}")
 
         col_settings, col_details = st.columns([1, 2])
 
-        selected_row = df[df["Fullt Navn"] == st.session_state.selected_employee].iloc[0]
+        selected_row = df[df["_hash"] == st.session_state.selected_employee].iloc[0]
         stillingskode = selected_row["Stillingskode"]
         is_outlier = selected_row["_hash"] in set(st.session_state.outliers_by_code.get(str(stillingskode), []))
 
@@ -1091,7 +1106,8 @@ try:
     if union_values:
         st.markdown("**Hurtigeksport per fagforening:**")
         for uv in union_values:
-            members = sorted(df[df[union_col] == uv]["Fullt Navn"].tolist())
+            member_hashes = set(df.loc[df[union_col] == uv, "_hash"])
+            members = [h for h in employee_hashes_by_name if h in member_hashes]
             btn_col, dl_col = st.columns([2, 2])
             with btn_col:
                 if st.button(f"📄 Generer for alle {uv}-medlemmer ({len(members)} stk)", key=f"union_export_btn_{uv}"):
@@ -1119,10 +1135,10 @@ try:
         "Fagforeningstilhørighet sendes aldri med i PDF-en."
     )
 
-    all_names_in_dataset = sorted(df["Fullt Navn"].tolist())
     export_selection = st.multiselect(
         "Velg ansatte for eksport:",
-        options=all_names_in_dataset,
+        options=employee_hashes_by_name,
+        format_func=lambda h: employee_label_by_hash.get(h, "?"),
         key="export_selection",
     )
 
@@ -1146,11 +1162,7 @@ try:
 
     st.session_state.data_loaded_ok = True
 
-    selected_hash = None
-    if st.session_state.selected_employee:
-        match = df[df["Fullt Navn"] == st.session_state.selected_employee]
-        if not match.empty:
-            selected_hash = match.iloc[0]["_hash"]
+    selected_hash = st.session_state.selected_employee if st.session_state.selected_employee in name_by_hash else None
 
     store.save_settlement(
         settlement_name,
